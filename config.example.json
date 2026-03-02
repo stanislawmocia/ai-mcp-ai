@@ -1,0 +1,67 @@
+{
+  "device": {
+    "alias": "my-claude",
+    "http_port": 7432,
+    "db_path": "./comm.db",
+    "ssh_user": "stan",
+    "ssh_key_path": "~/.ssh/id_ed25519"
+  },
+
+  "listener": {
+    "enabled": true,
+    "poll_interval_ms": 2000,
+    "auto_reply": false,
+    "auto_reply_prompt": ""
+  },
+
+  "wake": {
+    "wol_enabled": false,
+    "wol_broadcast": "255.255.255.255",
+    "ssh_enabled": true,
+    "ssh_startup_wait_seconds": 10
+  },
+
+  "agents": {
+    "claude": {
+      "enabled": true,
+      "command": "claude",
+      "args": ["--mcp-config", "~/.config/claude/mcp.json"],
+      "env": {}
+    },
+    "gemini": {
+      "enabled": false,
+      "command": "gemini",
+      "args": [],
+      "env": {
+        "GEMINI_API_KEY": ""
+      }
+    },
+    "custom": {
+      "enabled": false,
+      "command": "",
+      "args": [],
+      "env": {}
+    }
+  },
+
+  "peers": {
+    "macbook-stan": {
+      "tailscale_ip": "100.x.x.x",
+      "alias": "macbook-stan",
+      "public_key": "",
+      "mac_address": "",
+      "preferred_agent": "claude",
+      "ssh_user": "stan",
+      "auto_wake": false
+    },
+    "vps-server": {
+      "tailscale_ip": "100.y.y.y",
+      "alias": "vps-server",
+      "public_key": "",
+      "mac_address": "",
+      "preferred_agent": "gemini",
+      "ssh_user": "ubuntu",
+      "auto_wake": false
+    }
+  }
+}

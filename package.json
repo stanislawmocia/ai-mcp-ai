@@ -1,0 +1,29 @@
+{
+  "name": "mcp-ai-comm",
+  "version": "1.0.0",
+  "description": "MCP server for AI-to-AI communication over Tailscale with E2E encryption",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "better-sqlite3": "^9.4.3",
+    "fastify": "^5.0.0",
+    "libsodium-wrappers": "^0.7.15",
+    "node-ssh": "^13.2.0",
+    "wake_on_lan": "^1.0.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.8",
+    "@types/libsodium-wrappers": "^0.7.14",
+    "@types/node": "^22.0.0",
+    "@types/wake_on_lan": "^0.0.33",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
