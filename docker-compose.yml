@@ -1,0 +1,31 @@
+services:
+  mcp-ai-comm:
+    build: .
+    image: mcp-ai-comm:latest
+
+    # Host networking so the container can bind to the Tailscale IP (100.x.x.x)
+    # and call `tailscale ip` via the mounted socket.
+    network_mode: host
+
+    # Mount Tailscale daemon socket so the `tailscale` CLI inside the container
+    # talks to the host Tailscale daemon (no separate daemon needed).
+    volumes:
+      - /var/run/tailscale:/var/run/tailscale
+      - ./config.json:/app/config.json:ro
+      - mcp_data:/data
+
+    env_file:
+      - .env
+
+    restart: unless-stopped
+
+    # Healthcheck via the /health endpoint (no Tailscale auth needed)
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:7432/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  mcp_data:

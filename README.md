@@ -26,7 +26,51 @@ Allows Claude Code, Gemini CLI and other AI agents to communicate securely acros
 3. **Key storage:** AES-256-GCM encrypted secret key in SQLite (passphrase from env var)
 4. **Access control:** HTTP server binds only to Tailscale IP (100.x.x.x)
 
-## Installation
+## Quick start with Docker
+
+```bash
+git clone <repo> mcp-ai-comm
+cd mcp-ai-comm
+
+# 1. Create config and env files
+make setup          # copies config.example.json → config.json and .env.example → .env
+
+# 2. Edit both files
+nano config.json    # set your alias, peers, etc.
+nano .env           # set MCP_COMM_KEY_PASSPHRASE
+
+# 3. Build and start HTTP receiver
+make up             # runs in background
+
+# Useful commands:
+make logs           # tail logs
+make restart        # restart container
+make rebuild        # rebuild image after code / .env changes
+make down           # stop
+```
+
+**Using in Claude Code** — after `make build`, add to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "ai-comm": {
+      "command": "docker",
+      "args": [
+        "run", "--rm", "-i",
+        "--network", "host",
+        "-v", "/var/run/tailscale:/var/run/tailscale",
+        "-v", "/absolute/path/to/config.json:/app/config.json:ro",
+        "-v", "mcp_ai_comm_data:/data",
+        "--env-file", "/absolute/path/to/.env",
+        "mcp-ai-comm:latest"
+      ]
+    }
+  }
+}
+```
+
+## Installation (without Docker)
 
 ```bash
 git clone <repo> mcp-ai-comm
