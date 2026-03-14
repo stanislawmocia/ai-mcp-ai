@@ -1,4 +1,4 @@
-import { execSync, exec } from "child_process";
+import { exec } from "child_process";
 import { promisify } from "util";
 
 const execAsync = promisify(exec);
@@ -31,9 +31,26 @@ interface TailscaleStatus {
   Peer: Record<string, TailscaleStatusPeer>;
 }
 
+/**
+ * Try to get Tailscale socket path for the current OS.
+ * Returns extra env/args for tailscale CLI commands.
+ */
+function getTailscaleSocketArg(): string {
+  // If explicitly set via env, use that
+  if (process.env.TAILSCALE_SOCKET) {
+    return `--socket=${process.env.TAILSCALE_SOCKET}`;
+  }
+  return "";
+}
+
+function tailscaleCmd(subcommand: string): string {
+  const socketArg = getTailscaleSocketArg();
+  return `tailscale ${socketArg} ${subcommand}`.replace(/\s+/g, " ").trim();
+}
+
 export async function getTailscaleStatus(): Promise<TailscaleDevice[]> {
   try {
-    const { stdout } = await execAsync("tailscale status --json");
+    const { stdout } = await execAsync(tailscaleCmd("status --json"));
     const status = JSON.parse(stdout) as TailscaleStatus;
 
     const devices: TailscaleDevice[] = [];
@@ -69,12 +86,25 @@ export async function getTailscaleStatus(): Promise<TailscaleDevice[]> {
 }
 
 export async function getMyTailscaleIp(): Promise<string> {
-  try {
-    const { stdout } = await execAsync("tailscale ip --4");
-    const ip = stdout.trim();
-    if (!ip.startsWith("100.")) {
-      throw new Error(`Unexpected Tailscale IP format: ${ip}`);
+  // 1. Environment variable override (for Docker on macOS/Windows where
+  //    the tailscale CLI inside the container can't reach the host daemon)
+  if (process.env.TAILSCALE_IP) {
+    const ip = process.env.TAILSCALE_IP.trim();
+    if (ip) {
+      console.error(`[tailscale] Using TAILSCALE_IP from env: ${ip}`);
+      return ip;
     }
+  }
+
+  // 2. Try tailscale CLI
+  try {
+    const { stdout } = await execAsync(tailscaleCmd("ip --4"));
+    const ip = stdout.trim();
+    if (ip.startsWith("100.")) {
+      return ip;
+    }
+    // Non-standard IP — warn but accept
+    console.error(`[tailscale] Unexpected IP format: ${ip}, using anyway`);
     return ip;
   } catch {
     // Fallback: parse from status
@@ -88,7 +118,10 @@ export async function getMyTailscaleIp(): Promise<string> {
       // ignore
     }
     throw new Error(
-      "Could not determine Tailscale IP. Is tailscale running? Try: tailscale up"
+      "Could not determine Tailscale IP. Options:\n" +
+      "  1. Set TAILSCALE_IP=100.x.x.x environment variable\n" +
+      "  2. Mount Tailscale socket: -v /var/run/tailscale:/var/run/tailscale\n" +
+      "  3. Ensure tailscale is running: tailscale up"
     );
   }
 }

@@ -3,8 +3,9 @@
     "alias": "my-claude",
     "http_port": 7432,
     "db_path": "./comm.db",
-    "ssh_user": "stan",
-    "ssh_key_path": "~/.ssh/id_ed25519"
+    "ssh_user": "",
+    "ssh_key_path": "~/.ssh/id_ed25519",
+    "bind_address": ""
   },
 
   "listener": {
@@ -25,7 +26,7 @@
     "claude": {
       "enabled": true,
       "command": "claude",
-      "args": ["--mcp-config", "~/.config/claude/mcp.json"],
+      "args": [],
       "env": {}
     },
     "gemini": {
@@ -45,22 +46,13 @@
   },
 
   "peers": {
-    "macbook-stan": {
+    "example-peer": {
       "tailscale_ip": "100.x.x.x",
-      "alias": "macbook-stan",
+      "alias": "example-peer",
       "public_key": "",
       "mac_address": "",
       "preferred_agent": "claude",
-      "ssh_user": "stan",
-      "auto_wake": false
-    },
-    "vps-server": {
-      "tailscale_ip": "100.y.y.y",
-      "alias": "vps-server",
-      "public_key": "",
-      "mac_address": "",
-      "preferred_agent": "gemini",
-      "ssh_user": "ubuntu",
+      "ssh_user": "",
       "auto_wake": false
     }
   }

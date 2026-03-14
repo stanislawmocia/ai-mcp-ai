@@ -2,17 +2,21 @@ import { z } from "zod";
 import { randomUUID } from "crypto";
 import { messages, peers } from "../../db/index.js";
 import { encryptMessage, getPublicKeyBase64 } from "../../crypto/index.js";
-import { getConfig } from "../../config/index.js";
+import { getConfig, getSession } from "../../config/index.js";
 import { resolveDeviceIp } from "../../tailscale/index.js";
 
 export const sendMessageSchema = z.object({
-  to: z.string().describe("Device alias or Tailscale IP"),
+  to: z.string().describe("Device alias, session alias (alias/session_id), or Tailscale IP"),
   message: z.string().describe("Message text to send"),
   reply_to_id: z.string().optional().describe("ID of message being replied to"),
   message_type: z
     .enum(["message", "approval_request", "approval_response"])
     .optional()
     .describe("Type of message (default: message)"),
+  port: z
+    .number()
+    .optional()
+    .describe("Override target port (for reaching a specific session on a different port)"),
 });
 
 async function fetchPubkey(ip: string, port: number, alias: string): Promise<string> {
@@ -33,15 +37,25 @@ async function fetchPubkey(ip: string, port: number, alias: string): Promise<str
 
 export async function sendMessage(args: z.infer<typeof sendMessageSchema>): Promise<string> {
   const config = getConfig();
+  const session = getSession();
   const { to, message, reply_to_id, message_type } = args;
 
-  // Resolve device
-  const ip = await resolveDeviceIp(to, config.peers);
-  const port = config.device.http_port;
+  // Parse "alias/session_id" format or plain alias
+  let targetAlias = to;
+  let targetSessionId: string | undefined;
+  if (to.includes("/") && !to.startsWith("100.")) {
+    const parts = to.split("/");
+    targetAlias = parts[0];
+    targetSessionId = parts.slice(1).join("/");
+  }
+
+  // Resolve device IP
+  const ip = await resolveDeviceIp(targetAlias, config.peers);
+  const port = args.port ?? config.device.http_port;
 
   // Find or create peer record
-  let peer = peers.findByAlias(to) ?? peers.findByIp(ip);
-  const peerAlias = peer?.alias ?? to;
+  let peer = peers.findByAlias(targetAlias) ?? peers.findByIp(ip);
+  const peerAlias = peer?.alias ?? targetAlias;
 
   // Get recipient's public key
   let recipientPublicKey = peer?.public_key ?? "";
@@ -65,15 +79,19 @@ export async function sendMessage(args: z.infer<typeof sendMessageSchema>): Prom
   // Encrypt
   const { encryptedContent, nonce } = encryptMessage(message, recipientPublicKey);
 
+  // Build sender alias — include session info
+  const fromAlias = session?.session_alias ?? config.device.alias;
+
   // Send
   const body = {
-    from: config.device.alias,
-    from_ip: "", // server will use actual source IP
+    from: fromAlias,
+    from_ip: "",
     encrypted_content: encryptedContent,
     nonce,
     public_key: getPublicKeyBase64(),
     message_type: message_type ?? "message",
     reply_to_id: reply_to_id,
+    session_id: session?.session_id ?? undefined,
   };
 
   let response: Response;
@@ -97,16 +115,16 @@ export async function sendMessage(args: z.infer<typeof sendMessageSchema>): Prom
     throw new Error(`Server returned ${response.status}: ${text}`);
   }
 
-  const result = (await response.json()) as { received: boolean; id: string };
+  const result = (await response.json()) as { received: boolean; id: string; session_id?: string };
 
   // Save to our DB
   const msgId = randomUUID();
   messages.insert({
     id: msgId,
     direction: "out",
-    from_alias: config.device.alias,
+    from_alias: fromAlias,
     from_ip: null,
-    to_alias: peerAlias,
+    to_alias: to, // preserve full "alias/session_id" if given
     to_ip: ip,
     content: message,
     reply_to_id: reply_to_id ?? null,
@@ -114,13 +132,16 @@ export async function sendMessage(args: z.infer<typeof sendMessageSchema>): Prom
     status: "sent",
   });
 
-  console.error(`[send] Message sent to ${peerAlias} (remote id: ${result.id})`);
+  console.error(`[send] Message sent to ${to} (remote id: ${result.id})`);
 
   return JSON.stringify({
     message_id: msgId,
     remote_id: result.id,
+    remote_session_id: result.session_id ?? null,
     status: "sent",
-    to: peerAlias,
+    to,
     ip,
+    port,
+    from_session: session?.session_alias ?? config.device.alias,
   });
 }
