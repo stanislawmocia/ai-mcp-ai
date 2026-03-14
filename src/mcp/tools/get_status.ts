@@ -1,13 +1,14 @@
 import { z } from "zod";
-import { messages, peers, state } from "../../db/index.js";
+import { messages, peers } from "../../db/index.js";
 import { getPublicKeyBase64 } from "../../crypto/index.js";
-import { getConfig } from "../../config/index.js";
+import { getConfig, getSession } from "../../config/index.js";
 import { isListenerActive, getListenerStats } from "./start_listener.js";
 
 export const getStatusSchema = z.object({});
 
 export async function getStatus(_args: z.infer<typeof getStatusSchema>): Promise<string> {
   const config = getConfig();
+  const session = getSession();
 
   const connectedPeers = peers.all().map((p) => ({
     alias: p.alias,
@@ -31,6 +32,8 @@ export async function getStatus(_args: z.infer<typeof getStatusSchema>): Promise
   return JSON.stringify(
     {
       alias: config.device.alias,
+      session_id: session?.session_id ?? null,
+      session_alias: session?.session_alias ?? config.device.alias,
       http_port: config.device.http_port,
       public_key: publicKey,
       unread_count: unreadCount,

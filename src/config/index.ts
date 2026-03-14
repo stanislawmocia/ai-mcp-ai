@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from "fs";
 import { join, resolve } from "path";
 import { homedir, hostname } from "os";
+import { randomBytes } from "crypto";
 import { z } from "zod";
 
 const AgentConfigSchema = z.object({
@@ -27,6 +28,7 @@ const ConfigSchema = z.object({
     db_path: z.string().default("./comm.db"),
     ssh_user: z.string().default(""),
     ssh_key_path: z.string().default("~/.ssh/id_ed25519"),
+    bind_address: z.string().default("").describe("Address to bind HTTP server to. Empty = auto-detect"),
   }),
   listener: z.object({
     enabled: z.boolean().default(true),
@@ -51,6 +53,43 @@ const ConfigSchema = z.object({
 export type Config = z.infer<typeof ConfigSchema>;
 export type PeerConfig = z.infer<typeof PeerConfigSchema>;
 export type AgentConfig = z.infer<typeof AgentConfigSchema>;
+
+/**
+ * Session identity — unique per running MCP instance.
+ * Allows multiple MCP sessions on the same device to be addressable individually.
+ */
+export interface SessionInfo {
+  /** Short unique ID for this session, e.g. "a3f1" */
+  session_id: string;
+  /** Full session alias: "{device_alias}/{session_id}", e.g. "macbook-stan/a3f1" */
+  session_alias: string;
+  /** Port this session's HTTP server is bound to */
+  port: number;
+}
+
+let _sessionInfo: SessionInfo | null = null;
+
+function generateSessionId(): string {
+  // Use env var if set (for deterministic IDs in Docker), else random 4-hex
+  if (process.env.MCP_COMM_SESSION_ID) {
+    return process.env.MCP_COMM_SESSION_ID;
+  }
+  return randomBytes(2).toString("hex");
+}
+
+export function initSession(alias: string, port: number): SessionInfo {
+  const sessionId = generateSessionId();
+  _sessionInfo = {
+    session_id: sessionId,
+    session_alias: `${alias}/${sessionId}`,
+    port,
+  };
+  return _sessionInfo;
+}
+
+export function getSession(): SessionInfo | null {
+  return _sessionInfo;
+}
 
 function expandPath(p: string): string {
   if (p.startsWith("~/")) {
@@ -92,6 +131,12 @@ function loadConfig(): Config {
     (rawConfig.device as Record<string, unknown> | undefined) = {
       ...(rawConfig.device as Record<string, unknown> | undefined ?? {}),
       db_path: process.env.MCP_COMM_DB_PATH,
+    };
+  }
+  if (process.env.MCP_COMM_BIND_ADDRESS) {
+    (rawConfig.device as Record<string, unknown> | undefined) = {
+      ...(rawConfig.device as Record<string, unknown> | undefined ?? {}),
+      bind_address: process.env.MCP_COMM_BIND_ADDRESS,
     };
   }
 

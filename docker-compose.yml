@@ -3,23 +3,33 @@ services:
     build: .
     image: mcp-ai-comm:latest
 
-    # Host networking so the container can bind to the Tailscale IP (100.x.x.x)
-    # and call `tailscale ip` via the mounted socket.
+    # Use host networking on Linux for direct Tailscale IP binding.
+    # On macOS/Windows: remove network_mode, uncomment ports section below.
     network_mode: host
 
-    # Mount Tailscale daemon socket so the `tailscale` CLI inside the container
-    # talks to the host Tailscale daemon (no separate daemon needed).
+    # Uncomment for macOS / Windows (Docker Desktop) — port mapping mode:
+    # ports:
+    #   - "7432:7432"
+
     volumes:
+      # Tailscale socket — lets the container CLI talk to host daemon.
+      # Linux:  /var/run/tailscale
+      # macOS:  /var/run/tailscale (via Docker Desktop VM — may not work,
+      #         set TAILSCALE_IP in .env instead)
       - /var/run/tailscale:/var/run/tailscale
+
+      # Config and persistent data
       - ./config.json:/app/config.json:ro
       - mcp_data:/data
 
     env_file:
       - .env
 
+    environment:
+      - MCP_COMM_DOCKER=1
+
     restart: unless-stopped
 
-    # Healthcheck via the /health endpoint (no Tailscale auth needed)
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:7432/health"]
       interval: 30s

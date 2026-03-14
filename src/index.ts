@@ -2,14 +2,20 @@ import { initDb, closeDb } from "./db/index.js";
 import { initCrypto } from "./crypto/index.js";
 import { startHttpServer } from "./http/server.js";
 import { startMcpServer } from "./mcp/server.js";
-import { getConfig } from "./config/index.js";
+import { getConfig, initSession } from "./config/index.js";
 import { getMyTailscaleIp } from "./tailscale/index.js";
 import { peers } from "./db/index.js";
 
 async function main(): Promise<void> {
   const config = getConfig();
 
-  // Init database
+  // Init session identity (unique per running instance)
+  const session = initSession(config.device.alias, config.device.http_port);
+  console.error(`[main] Session: ${session.session_alias} (id: ${session.session_id})`);
+
+  // Init database — each session can use its own DB if configured,
+  // or share one (default). For multi-session on same device with separate DBs,
+  // set MCP_COMM_DB_PATH to unique path per session.
   initDb(config.device.db_path);
   console.error(`[main] Database initialized at ${config.device.db_path}`);
 
@@ -37,8 +43,8 @@ async function main(): Promise<void> {
     console.error(`[main] Tailscale IP: ${tailscaleIp}`);
   } catch (err) {
     console.error(`[main] WARNING: ${err}`);
-    console.error("[main] Falling back to 127.0.0.1 - HTTP server will only be accessible locally");
-    tailscaleIp = "127.0.0.1";
+    console.error("[main] Falling back to 0.0.0.0 — HTTP server will accept all connections");
+    tailscaleIp = "0.0.0.0";
   }
 
   // Start HTTP server (non-blocking)
@@ -55,7 +61,9 @@ async function main(): Promise<void> {
   process.on("SIGINT", () => shutdown("SIGINT"));
 
   // Start MCP server (blocks - stdio)
-  console.error(`[main] Starting MCP server (alias: ${config.device.alias}, port: ${config.device.http_port})`);
+  console.error(
+    `[main] Starting MCP server (alias: ${config.device.alias}, session: ${session.session_alias}, port: ${config.device.http_port})`
+  );
   await startMcpServer();
 }
 
