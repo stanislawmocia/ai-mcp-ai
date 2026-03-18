@@ -5,9 +5,10 @@ import crypto from 'node:crypto';
 
 const RING_SIZE = 100;
 const LOG_DIR = process.env.AGENT_LOG_DIR ?? '/tmp/meshmind-agents';
+const DEFAULT_ONESHOT_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 
 export type AgentMode = 'oneshot' | 'interactive';
-export type AgentStatus = 'starting' | 'running' | 'done' | 'failed' | 'killed';
+export type AgentStatus = 'starting' | 'running' | 'done' | 'failed' | 'killed' | 'timeout';
 
 export interface AgentSession {
   id: string;
@@ -21,6 +22,7 @@ export interface AgentSession {
   endedAt: string | null;
   ringBuffer: string[];
   logFile: string;
+  timeoutMs: number | null;
 }
 
 export interface AgentStartOpts {
@@ -28,8 +30,9 @@ export interface AgentStartOpts {
   mode: AgentMode;
   workdir: string;
   args?: string[];
-  prompt?: string;       // for oneshot mode — the prompt to send
-  systemPrompt?: string; // passed as arg if tool supports it
+  prompt?: string;
+  systemPrompt?: string;
+  timeoutMs?: number; // oneshot timeout in ms, default 5min
 }
 
 export interface AgentManager {
@@ -45,6 +48,7 @@ export interface AgentManager {
   } | null;
   kill(id: string): { ok: boolean; error?: string };
   list(): AgentSession[];
+  runningIds(): string[];
 }
 
 // Map tool names to actual commands
@@ -52,17 +56,14 @@ const TOOL_COMMANDS: Record<string, { cmd: string; defaultArgs: string[] }> = {
   'claude-code': { cmd: 'claude', defaultArgs: ['--print'] },
   'claude': { cmd: 'claude', defaultArgs: ['--print'] },
   'aider': { cmd: 'aider', defaultArgs: [] },
-  'python': { cmd: 'python3', defaultArgs: ['-u'] }, // unbuffered
+  'python': { cmd: 'python3', defaultArgs: ['-u'] },
   'node': { cmd: 'node', defaultArgs: ['-i'] },
   'bash': { cmd: 'bash', defaultArgs: [] },
 };
 
 function resolveCommand(tool: string, mode: AgentMode, opts: AgentStartOpts): { cmd: string; args: string[] } {
-  const known = TOOL_COMMANDS[tool];
-
   if (tool === 'claude-code' || tool === 'claude') {
     if (mode === 'oneshot') {
-      // claude --print "prompt"
       const args = ['--print'];
       if (opts.systemPrompt) {
         args.push('--system-prompt', opts.systemPrompt);
@@ -72,7 +73,6 @@ function resolveCommand(tool: string, mode: AgentMode, opts: AgentStartOpts): { 
       }
       return { cmd: 'claude', args };
     } else {
-      // interactive: claude (no --print, we'll write to stdin)
       const args: string[] = [];
       if (opts.systemPrompt) {
         args.push('--system-prompt', opts.systemPrompt);
@@ -81,19 +81,19 @@ function resolveCommand(tool: string, mode: AgentMode, opts: AgentStartOpts): { 
     }
   }
 
+  const known = TOOL_COMMANDS[tool];
   if (known) {
     return { cmd: known.cmd, args: [...known.defaultArgs, ...(opts.args ?? [])] };
   }
 
-  // Generic: treat tool as the command itself
   return { cmd: tool, args: opts.args ?? [] };
 }
 
 export function createAgentManager(): AgentManager {
   const sessions = new Map<string, AgentSession>();
   const processes = new Map<string, ChildProcess>();
+  const timers = new Map<string, ReturnType<typeof setTimeout>>();
 
-  // Ensure log dir exists
   if (!fs.existsSync(LOG_DIR)) {
     fs.mkdirSync(LOG_DIR, { recursive: true });
   }
@@ -107,6 +107,14 @@ export function createAgentManager(): AgentManager {
 
   function appendToLog(session: AgentSession, data: string) {
     fs.appendFileSync(session.logFile, data);
+  }
+
+  function clearTimer(id: string) {
+    const timer = timers.get(id);
+    if (timer) {
+      clearTimeout(timer);
+      timers.delete(id);
+    }
   }
 
   function setupProcessHandlers(id: string, proc: ChildProcess, session: AgentSession) {
@@ -131,15 +139,21 @@ export function createAgentManager(): AgentManager {
     });
 
     proc.on('close', (code, signal) => {
+      clearTimer(id);
       session.exitCode = code;
       session.endedAt = new Date().toISOString();
-      session.status = signal === 'SIGKILL' || signal === 'SIGTERM' ? 'killed'
-        : code === 0 ? 'done' : 'failed';
+      if (session.status === 'timeout') {
+        // already set by timeout handler
+      } else {
+        session.status = signal === 'SIGKILL' || signal === 'SIGTERM' ? 'killed'
+          : code === 0 ? 'done' : 'failed';
+      }
       appendToRing(session, `[agent] Process exited: code=${code} signal=${signal}`);
       processes.delete(id);
     });
 
     proc.on('error', (err) => {
+      clearTimer(id);
       session.status = 'failed';
       session.endedAt = new Date().toISOString();
       appendToRing(session, `[agent] Error: ${err.message}`);
@@ -153,6 +167,10 @@ export function createAgentManager(): AgentManager {
       const logFile = path.join(LOG_DIR, `${id}.log`);
       const { cmd, args } = resolveCommand(opts.tool, opts.mode, opts);
 
+      const timeoutMs = opts.mode === 'oneshot'
+        ? (opts.timeoutMs ?? DEFAULT_ONESHOT_TIMEOUT)
+        : null; // interactive has no auto-timeout
+
       const session: AgentSession = {
         id,
         tool: opts.tool,
@@ -165,6 +183,7 @@ export function createAgentManager(): AgentManager {
         endedAt: null,
         ringBuffer: [],
         logFile,
+        timeoutMs,
       };
 
       sessions.set(id, session);
@@ -185,6 +204,25 @@ export function createAgentManager(): AgentManager {
         appendToLog(session, `[${session.startedAt}] Started: ${cmd} ${args.join(' ')} (pid=${proc.pid})\n`);
 
         setupProcessHandlers(id, proc, session);
+
+        // Oneshot timeout
+        if (timeoutMs) {
+          const timer = setTimeout(() => {
+            if (session.status === 'running') {
+              session.status = 'timeout';
+              appendToRing(session, `[agent] Timeout after ${timeoutMs}ms — killing process`);
+              proc.kill('SIGTERM');
+              setTimeout(() => {
+                if (processes.has(id)) {
+                  proc.kill('SIGKILL');
+                }
+              }, 5000).unref();
+            }
+            timers.delete(id);
+          }, timeoutMs);
+          timer.unref();
+          timers.set(id, timer);
+        }
       } catch (err) {
         session.status = 'failed';
         session.endedAt = new Date().toISOString();
@@ -233,14 +271,12 @@ export function createAgentManager(): AgentManager {
       const session = sessions.get(id);
       if (!session) return { ok: false, error: 'Session not found' };
 
+      clearTimer(id);
+
       const proc = processes.get(id);
-      if (!proc) {
-        // Already exited
-        return { ok: true };
-      }
+      if (!proc) return { ok: true };
 
       proc.kill('SIGTERM');
-      // Force kill after 5s if still alive
       setTimeout(() => {
         if (processes.has(id)) {
           proc.kill('SIGKILL');
@@ -252,6 +288,12 @@ export function createAgentManager(): AgentManager {
 
     list() {
       return Array.from(sessions.values());
+    },
+
+    runningIds() {
+      return Array.from(sessions.values())
+        .filter(s => s.status === 'running')
+        .map(s => s.id);
     },
   };
 }

@@ -1,12 +1,14 @@
-FROM node:22-alpine AS builder
+FROM oven/bun:1-alpine AS builder
 WORKDIR /app
-COPY packages/node-agent/package.json packages/node-agent/package-lock.json* ./
-RUN npm install
+COPY packages/node-agent/package.json ./
+RUN bun install
 COPY packages/node-agent/tsconfig.json ./
 COPY packages/node-agent/src ./src
-RUN npx tsc
+RUN bun build src/bin/cli.ts --outdir ./dist/bin --target bun && \
+    bun build src/server.ts --outdir ./dist --target bun
 
-FROM node:22-alpine
+FROM oven/bun:1-alpine
+RUN apk add --no-cache git curl
 WORKDIR /app
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules ./node_modules

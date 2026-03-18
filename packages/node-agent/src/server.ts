@@ -1,6 +1,6 @@
 import Fastify from 'fastify';
 import { execHandler } from './executor.js';
-import { getHealthInfo, getCapabilities } from './monitor.js';
+import { getHealthInfo, getCapabilities, setAgentProvider } from './monitor.js';
 import { startHeartbeat } from './heartbeat.js';
 import { createAgentManager, type AgentMode } from './agents.js';
 
@@ -15,10 +15,13 @@ export async function startNodeAgent(config: NodeAgentConfig) {
   const fastify = Fastify({ logger: true });
   const agentManager = createAgentManager();
 
+  // Wire runningAgents into capabilities/heartbeat
+  setAgentProvider(() => agentManager.runningIds());
+
   // Auth middleware
   fastify.addHook('onRequest', async (request, reply) => {
     const url = request.url;
-    if (url === '/health') return; // health is public
+    if (url === '/health') return;
 
     const auth = request.headers.authorization;
     if (!auth || auth !== `Bearer ${config.token}`) {
@@ -69,14 +72,14 @@ export async function startNodeAgent(config: NodeAgentConfig) {
       args?: string[];
       prompt?: string;
       systemPrompt?: string;
+      timeoutMs?: number;
     };
   }>('/start-agent', async (request, reply) => {
-    const { tool, workdir, mode, args, prompt, systemPrompt } = request.body;
+    const { tool, workdir, mode, args, prompt, systemPrompt, timeoutMs } = request.body;
 
     // Check if tool is available
     const caps = getCapabilities();
     const toolName = tool === 'claude-code' ? 'claude' : tool;
-    // Allow generic commands — only warn for known tools that are missing
     const knownTools = ['claude', 'aider', 'python3', 'node'];
     if (knownTools.includes(toolName) && !caps.tools.includes(toolName)) {
       reply.code(400).send({
@@ -93,6 +96,7 @@ export async function startNodeAgent(config: NodeAgentConfig) {
       args,
       prompt,
       systemPrompt,
+      timeoutMs,
     });
 
     return {
@@ -101,6 +105,7 @@ export async function startNodeAgent(config: NodeAgentConfig) {
       status: session.status,
       mode: session.mode,
       tool: session.tool,
+      timeoutMs: session.timeoutMs,
     };
   });
 
@@ -172,7 +177,6 @@ export async function startNodeAgent(config: NodeAgentConfig) {
   // Graceful shutdown
   const shutdown = async () => {
     console.log('[meshmind-node] Shutting down...');
-    // Kill all running agents
     for (const session of agentManager.list()) {
       if (session.status === 'running') {
         agentManager.kill(session.id);

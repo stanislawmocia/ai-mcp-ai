@@ -14,12 +14,13 @@ export function registerAgentTools(server: McpServer, hub: HubClient) {
       prompt: z.string().optional().describe('Prompt to send (oneshot mode — passed as argument to claude --print)'),
       systemPrompt: z.string().optional().describe('System prompt for Claude Code'),
       args: z.array(z.string()).optional().describe('Extra CLI args for the tool'),
+      timeoutMs: z.number().optional().describe('Oneshot timeout in ms (default: 300000 = 5min). Ignored for interactive mode.'),
     },
-    async ({ nodeName, tool, workdir, mode, prompt, systemPrompt, args }) => {
+    async ({ nodeName, tool, workdir, mode, prompt, systemPrompt, args, timeoutMs }) => {
       try {
         const res = await hub.fetch('/agents/spawn', {
           method: 'POST',
-          body: JSON.stringify({ nodeName, tool, workdir, mode, prompt, systemPrompt, args }),
+          body: JSON.stringify({ nodeName, tool, workdir, mode, prompt, systemPrompt, args, timeoutMs }),
         });
 
         const result = await res.json() as Record<string, unknown>;

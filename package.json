@@ -5,15 +5,15 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "npm run build:node-agent && npm run build:hub-core && npm run build:hub-mcp && npm run build:cli",
-    "build:node-agent": "cd packages/node-agent && npx tsc",
-    "build:hub-core": "cd packages/hub-core && npx tsc",
-    "build:hub-mcp": "cd packages/hub-mcp && npx tsc",
-    "build:cli": "cd cli && npx tsc",
-    "dev:hub-core": "cd packages/hub-core && npx tsx src/server.ts",
-    "dev:hub-mcp": "cd packages/hub-mcp && npx tsx src/index.ts",
-    "dev:node-agent": "cd packages/node-agent && npx tsx src/bin/cli.ts",
-    "install:all": "npm install && cd packages/node-agent && npm install && cd ../hub-core && npm install && cd ../hub-mcp && npm install && cd ../../cli && npm install"
+    "build": "bun run build:node-agent && bun run build:hub-core && bun run build:hub-mcp && bun run build:cli",
+    "build:node-agent": "cd packages/node-agent && bun x tsc",
+    "build:hub-core": "cd packages/hub-core && bun x tsc",
+    "build:hub-mcp": "cd packages/hub-mcp && bun x tsc",
+    "build:cli": "cd cli && bun x tsc",
+    "dev:hub-core": "cd packages/hub-core && bun run src/server.ts",
+    "dev:hub-mcp": "cd packages/hub-mcp && bun run src/index.ts",
+    "dev:node-agent": "cd packages/node-agent && bun run src/bin/cli.ts",
+    "install:all": "bun install && cd packages/node-agent && bun install && cd ../hub-core && bun install && cd ../hub-mcp && bun install && cd ../../cli && bun install"
   },
   "dependencies": {},
   "devDependencies": {

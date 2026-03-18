@@ -21,6 +21,13 @@ export interface Capabilities {
   runningAgents: string[];
 }
 
+// Optional callback to get running agent IDs from AgentManager
+let getRunningAgentIds: (() => string[]) | null = null;
+
+export function setAgentProvider(fn: () => string[]) {
+  getRunningAgentIds = fn;
+}
+
 export function getHealthInfo(name: string): HealthInfo {
   return {
     name,
@@ -56,12 +63,12 @@ function detectGpu(): boolean {
 }
 
 export function getCapabilities(): Capabilities {
-  const toolChecks = ['claude', 'git', 'docker', 'node', 'python3', 'go', 'cargo'];
+  const toolChecks = ['claude', 'git', 'docker', 'node', 'python3', 'go', 'cargo', 'bun'];
   const tools = toolChecks.filter(commandExists);
 
   return {
     hasGpu: detectGpu(),
     tools,
-    runningAgents: [], // Phase 2
+    runningAgents: getRunningAgentIds ? getRunningAgentIds() : [],
   };
 }

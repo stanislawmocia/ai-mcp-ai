@@ -1,4 +1,6 @@
 services:
+  # ──── Always-on hub services (run on your main server) ────
+
   hub-core:
     build:
       context: .
@@ -39,16 +41,23 @@ services:
       timeout: 5s
       retries: 3
 
-  node-agent-hp:
+  # ──── Node agent (one per machine) ────
+  # On the hub server itself, runs with host networking
+  # For remote machines, use: ./scripts/install-node.sh
+
+  node-agent-local:
     build:
       context: .
       dockerfile: packages/node-agent/Dockerfile
     network_mode: host
+    profiles: ["with-local-node"]
     environment:
-      NODE_NAME: hp-server
+      NODE_NAME: ${NODE_NAME:-hub-server}
       HUB_URL: http://localhost:7433
       HUB_TOKEN: ${HUB_TOKEN}
       AGENT_PORT: "7432"
+    volumes:
+      - agent_logs:/tmp/meshmind-agents
     restart: unless-stopped
     depends_on:
       hub-core:
@@ -56,3 +65,4 @@ services:
 
 volumes:
   hub_data:
+  agent_logs:

@@ -1,13 +1,47 @@
 import Fastify from 'fastify';
+import type Database from 'better-sqlite3';
 import { initDb } from './db.js';
-import { createRegistry, type NodeRegistry } from './registry.js';
-import { createBroker, type TaskBroker } from './broker.js';
-import { createContextStore, type ContextStore } from './context.js';
+import { createRegistry } from './registry.js';
+import { createBroker } from './broker.js';
+import { createContextStore } from './context.js';
 
 export interface HubConfig {
   port: number;
   token: string;
   dbPath: string;
+}
+
+// ──── Session-to-Node SQLite store ────
+
+function createSessionStore(db: Database.Database) {
+  const stmts = {
+    upsert: db.prepare(`
+      INSERT INTO agent_sessions (session_id, node_name, tool, mode, status)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(session_id) DO UPDATE SET
+        status = excluded.status,
+        updated_at = datetime('now')
+    `),
+    getNode: db.prepare('SELECT node_name FROM agent_sessions WHERE session_id = ?'),
+    updateStatus: db.prepare(`UPDATE agent_sessions SET status = ?, updated_at = datetime('now') WHERE session_id = ?`),
+    list: db.prepare('SELECT * FROM agent_sessions ORDER BY created_at DESC LIMIT 200'),
+  };
+
+  return {
+    set(sessionId: string, nodeName: string, tool: string, mode: string, status = 'running') {
+      stmts.upsert.run(sessionId, nodeName, tool, mode, status);
+    },
+    getNode(sessionId: string): string | null {
+      const row = stmts.getNode.get(sessionId) as { node_name: string } | undefined;
+      return row?.node_name ?? null;
+    },
+    updateStatus(sessionId: string, status: string) {
+      stmts.updateStatus.run(status, sessionId);
+    },
+    list() {
+      return stmts.list.all();
+    },
+  };
 }
 
 export async function startHubCore(config: HubConfig) {
@@ -16,6 +50,7 @@ export async function startHubCore(config: HubConfig) {
   const registry = createRegistry();
   const broker = createBroker(db);
   const contextStore = createContextStore(db);
+  const sessionStore = createSessionStore(db);
 
   // Auth middleware
   fastify.addHook('onRequest', async (request, reply) => {
@@ -98,7 +133,6 @@ export async function startHubCore(config: HubConfig) {
 
   // ──── Agent Proxy ────
 
-  // Helper: proxy request to node-agent
   async function proxyToNode(
     nodeName: string,
     path: string,
@@ -127,9 +161,6 @@ export async function startHubCore(config: HubConfig) {
     }
   }
 
-  // Session-to-node mapping (tracks which node holds which agent session)
-  const sessionNodeMap = new Map<string, string>();
-
   // Spawn agent on node
   fastify.post<{
     Body: {
@@ -140,6 +171,7 @@ export async function startHubCore(config: HubConfig) {
       args?: string[];
       prompt?: string;
       systemPrompt?: string;
+      timeoutMs?: number;
     };
   }>('/agents/spawn', async (request, reply) => {
     const { nodeName, ...agentOpts } = request.body;
@@ -148,16 +180,16 @@ export async function startHubCore(config: HubConfig) {
       reply.code(result.status).send(result.data);
       return;
     }
-    // Track session → node mapping
-    const data = result.data as { sessionId: string };
-    sessionNodeMap.set(data.sessionId, nodeName);
+    const data = result.data as { sessionId: string; tool: string; mode: string };
+    // Persist session→node in SQLite
+    sessionStore.set(data.sessionId, nodeName, data.tool, data.mode);
     return result.data;
   });
 
   // Get agent status
   fastify.get<{ Params: { sessionId: string } }>('/agents/:sessionId', async (request, reply) => {
     const { sessionId } = request.params;
-    const nodeName = sessionNodeMap.get(sessionId);
+    const nodeName = sessionStore.getNode(sessionId);
     if (!nodeName) {
       reply.code(404).send({ error: `Session "${sessionId}" not found in hub registry` });
       return;
@@ -176,7 +208,7 @@ export async function startHubCore(config: HubConfig) {
     Body: { message: string };
   }>('/agents/:sessionId/send', async (request, reply) => {
     const { sessionId } = request.params;
-    const nodeName = sessionNodeMap.get(sessionId);
+    const nodeName = sessionStore.getNode(sessionId);
     if (!nodeName) {
       reply.code(404).send({ error: `Session "${sessionId}" not found in hub registry` });
       return;
@@ -195,7 +227,7 @@ export async function startHubCore(config: HubConfig) {
     Querystring: { offset?: string; limit?: string };
   }>('/agents/:sessionId/read', async (request, reply) => {
     const { sessionId } = request.params;
-    const nodeName = sessionNodeMap.get(sessionId);
+    const nodeName = sessionStore.getNode(sessionId);
     if (!nodeName) {
       reply.code(404).send({ error: `Session "${sessionId}" not found in hub registry` });
       return;
@@ -217,7 +249,7 @@ export async function startHubCore(config: HubConfig) {
     Params: { sessionId: string };
   }>('/agents/:sessionId', async (request, reply) => {
     const { sessionId } = request.params;
-    const nodeName = sessionNodeMap.get(sessionId);
+    const nodeName = sessionStore.getNode(sessionId);
     if (!nodeName) {
       reply.code(404).send({ error: `Session "${sessionId}" not found in hub registry` });
       return;
@@ -227,6 +259,7 @@ export async function startHubCore(config: HubConfig) {
       reply.code(result.status).send(result.data);
       return;
     }
+    sessionStore.updateStatus(sessionId, 'killed');
     return result.data;
   });
 
@@ -313,7 +346,6 @@ export async function startHubCore(config: HubConfig) {
 }
 
 function extractIp(ip: string): string {
-  // Handle IPv6-mapped IPv4 (::ffff:100.x.x.x)
   if (ip.startsWith('::ffff:')) {
     return ip.slice(7);
   }
