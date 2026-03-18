@@ -5,22 +5,29 @@ import type { HubClient } from '../index.js';
 export function registerAgentTools(server: McpServer, hub: HubClient) {
   server.tool(
     'spawn_agent',
-    'Start a Claude Code or other AI agent on a remote node. Returns a sessionId for tracking.',
+    'Start a long-lived process (Claude Code, aider, python, bash, etc.) on a remote node. Returns a sessionId. Use mode "oneshot" for single prompt→response, "interactive" for persistent stdin/stdout session.',
     {
       nodeName: z.string().describe('Target node name'),
-      tool: z.string().describe('Agent tool to start (e.g., "claude-code", "gemini")'),
+      tool: z.string().describe('Tool/command to start (e.g., "claude-code", "aider", "python", "bash")'),
       workdir: z.string().describe('Working directory for the agent'),
-      context: z.string().optional().describe('Initial context to pass to the agent'),
-      systemPrompt: z.string().optional().describe('System prompt for the agent'),
+      mode: z.enum(['oneshot', 'interactive']).default('oneshot').describe('"oneshot" = single prompt→response, "interactive" = persistent session'),
+      prompt: z.string().optional().describe('Prompt to send (oneshot mode — passed as argument to claude --print)'),
+      systemPrompt: z.string().optional().describe('System prompt for Claude Code'),
+      args: z.array(z.string()).optional().describe('Extra CLI args for the tool'),
     },
-    async ({ nodeName, tool, workdir, context, systemPrompt }) => {
+    async ({ nodeName, tool, workdir, mode, prompt, systemPrompt, args }) => {
       try {
-        // Phase 2 — proxy to node-agent /start-agent
-        const node = await hub.fetch(`/nodes/${encodeURIComponent(nodeName)}`);
-        if (!node.ok) {
+        const res = await hub.fetch('/agents/spawn', {
+          method: 'POST',
+          body: JSON.stringify({ nodeName, tool, workdir, mode, prompt, systemPrompt, args }),
+        });
+
+        const result = await res.json() as Record<string, unknown>;
+
+        if (!res.ok) {
           return {
             content: [
-              { type: 'text' as const, text: `Node "${nodeName}" not found or offline` },
+              { type: 'text' as const, text: `Failed to spawn agent: ${JSON.stringify(result)}` },
             ],
             isError: true,
           };
@@ -30,7 +37,17 @@ export function registerAgentTools(server: McpServer, hub: HubClient) {
           content: [
             {
               type: 'text' as const,
-              text: `Agent orchestration is Phase 2. Tool "${tool}" on "${nodeName}" at "${workdir}" would be started here.`,
+              text: JSON.stringify({
+                sessionId: result.sessionId,
+                pid: result.pid,
+                status: result.status,
+                mode: result.mode,
+                tool: result.tool,
+                node: nodeName,
+                hint: mode === 'interactive'
+                  ? 'Use agent_send to write to stdin, agent_read to check output.'
+                  : 'Use agent_read to check output when done.',
+              }, null, 2),
             },
           ],
         };
@@ -47,47 +64,166 @@ export function registerAgentTools(server: McpServer, hub: HubClient) {
 
   server.tool(
     'agent_send',
-    'Send a message to a running agent session',
+    'Send a message to a running interactive agent session (writes to stdin)',
     {
-      sessionId: z.string().describe('Agent session ID'),
-      message: z.string().describe('Message to send'),
+      sessionId: z.string().describe('Agent session ID from spawn_agent'),
+      message: z.string().describe('Message to write to agent stdin'),
     },
     async ({ sessionId, message }) => {
-      return {
-        content: [
-          { type: 'text' as const, text: `Agent orchestration is Phase 2. Would send "${message}" to session ${sessionId}.` },
-        ],
-      };
+      try {
+        const res = await hub.fetch(`/agents/${encodeURIComponent(sessionId)}/send`, {
+          method: 'POST',
+          body: JSON.stringify({ message }),
+        });
+
+        const result = await res.json() as Record<string, unknown>;
+
+        if (!res.ok) {
+          return {
+            content: [
+              { type: 'text' as const, text: `Failed to send: ${JSON.stringify(result)}` },
+            ],
+            isError: true,
+          };
+        }
+
+        return {
+          content: [
+            { type: 'text' as const, text: `Message sent to ${sessionId}. Use agent_read to check output.` },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            { type: 'text' as const, text: `Error: ${(error as Error).message}` },
+          ],
+          isError: true,
+        };
+      }
     },
   );
 
   server.tool(
     'agent_read',
-    'Read output from a running agent session',
+    'Read output from an agent session. Returns last lines from ring buffer (100 lines max), running status, and exit code.',
     {
-      sessionId: z.string().describe('Agent session ID'),
+      sessionId: z.string().describe('Agent session ID from spawn_agent'),
+      offset: z.number().optional().describe('Start reading from this line offset in ring buffer'),
+      limit: z.number().optional().describe('Max lines to return (default: all in buffer)'),
     },
-    async ({ sessionId }) => {
-      return {
-        content: [
-          { type: 'text' as const, text: `Agent orchestration is Phase 2. Would read from session ${sessionId}.` },
-        ],
-      };
+    async ({ sessionId, offset, limit }) => {
+      try {
+        const qs = new URLSearchParams();
+        if (offset !== undefined) qs.set('offset', String(offset));
+        if (limit !== undefined) qs.set('limit', String(limit));
+        const qsStr = qs.toString() ? `?${qs.toString()}` : '';
+
+        const res = await hub.fetch(`/agents/${encodeURIComponent(sessionId)}/read${qsStr}`);
+        const result = await res.json() as {
+          lines?: string[];
+          total?: number;
+          isRunning?: boolean;
+          status?: string;
+          exitCode?: number | null;
+          nodeName?: string;
+          error?: string;
+        };
+
+        if (!res.ok) {
+          return {
+            content: [
+              { type: 'text' as const, text: `Failed to read: ${JSON.stringify(result)}` },
+            ],
+            isError: true,
+          };
+        }
+
+        const parts: string[] = [];
+        parts.push(`[${sessionId}] Status: ${result.status} | Running: ${result.isRunning} | Node: ${result.nodeName}`);
+        if (result.exitCode !== null && result.exitCode !== undefined) {
+          parts.push(`Exit code: ${result.exitCode}`);
+        }
+        parts.push(`Lines in buffer: ${result.total}`);
+        if (result.lines && result.lines.length > 0) {
+          parts.push('--- output ---');
+          parts.push(result.lines.join('\n'));
+        } else {
+          parts.push('(no output yet)');
+        }
+
+        return {
+          content: [{ type: 'text' as const, text: parts.join('\n') }],
+        };
+      } catch (error) {
+        return {
+          content: [
+            { type: 'text' as const, text: `Error: ${(error as Error).message}` },
+          ],
+          isError: true,
+        };
+      }
     },
   );
 
   server.tool(
     'agent_kill',
-    'Kill a running agent session',
+    'Kill a running agent session (sends SIGTERM, then SIGKILL after 5s)',
     {
-      sessionId: z.string().describe('Agent session ID'),
+      sessionId: z.string().describe('Agent session ID to kill'),
     },
     async ({ sessionId }) => {
-      return {
-        content: [
-          { type: 'text' as const, text: `Agent orchestration is Phase 2. Would kill session ${sessionId}.` },
-        ],
-      };
+      try {
+        const res = await hub.fetch(`/agents/${encodeURIComponent(sessionId)}`, {
+          method: 'DELETE',
+        });
+
+        const result = await res.json() as Record<string, unknown>;
+
+        if (!res.ok) {
+          return {
+            content: [
+              { type: 'text' as const, text: `Failed to kill: ${JSON.stringify(result)}` },
+            ],
+            isError: true,
+          };
+        }
+
+        return {
+          content: [
+            { type: 'text' as const, text: `Agent ${sessionId} kill signal sent.` },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            { type: 'text' as const, text: `Error: ${(error as Error).message}` },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  // Bonus: list all agents across all nodes
+  server.tool(
+    'list_agents',
+    'List all running and completed agent sessions across all mesh nodes',
+    {},
+    async () => {
+      try {
+        const res = await hub.fetch('/agents');
+        const agents = await res.json();
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify(agents, null, 2) }],
+        };
+      } catch (error) {
+        return {
+          content: [
+            { type: 'text' as const, text: `Error: ${(error as Error).message}` },
+          ],
+          isError: true,
+        };
+      }
     },
   );
 }

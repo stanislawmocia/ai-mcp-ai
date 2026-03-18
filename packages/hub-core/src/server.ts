@@ -96,6 +96,159 @@ export async function startHubCore(config: HubConfig) {
     }
   });
 
+  // ──── Agent Proxy ────
+
+  // Helper: proxy request to node-agent
+  async function proxyToNode(
+    nodeName: string,
+    path: string,
+    method: string,
+    body?: unknown,
+  ): Promise<{ ok: boolean; status: number; data: unknown }> {
+    const node = registry.getNode(nodeName);
+    if (!node) {
+      return { ok: false, status: 404, data: { error: `Node "${nodeName}" not found or offline` } };
+    }
+
+    const nodeUrl = `http://${node.tailscaleIp}:${node.port}${path}`;
+    try {
+      const res = await fetch(nodeUrl, {
+        method,
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${config.token}`,
+        },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      const data = await res.json();
+      return { ok: res.ok, status: res.status, data };
+    } catch (error) {
+      return { ok: false, status: 502, data: { error: `Failed to reach node at ${nodeUrl}`, details: (error as Error).message } };
+    }
+  }
+
+  // Session-to-node mapping (tracks which node holds which agent session)
+  const sessionNodeMap = new Map<string, string>();
+
+  // Spawn agent on node
+  fastify.post<{
+    Body: {
+      nodeName: string;
+      tool: string;
+      workdir: string;
+      mode?: string;
+      args?: string[];
+      prompt?: string;
+      systemPrompt?: string;
+    };
+  }>('/agents/spawn', async (request, reply) => {
+    const { nodeName, ...agentOpts } = request.body;
+    const result = await proxyToNode(nodeName, '/start-agent', 'POST', agentOpts);
+    if (!result.ok) {
+      reply.code(result.status).send(result.data);
+      return;
+    }
+    // Track session → node mapping
+    const data = result.data as { sessionId: string };
+    sessionNodeMap.set(data.sessionId, nodeName);
+    return result.data;
+  });
+
+  // Get agent status
+  fastify.get<{ Params: { sessionId: string } }>('/agents/:sessionId', async (request, reply) => {
+    const { sessionId } = request.params;
+    const nodeName = sessionNodeMap.get(sessionId);
+    if (!nodeName) {
+      reply.code(404).send({ error: `Session "${sessionId}" not found in hub registry` });
+      return;
+    }
+    const result = await proxyToNode(nodeName, `/agent/${sessionId}`, 'GET');
+    if (!result.ok) {
+      reply.code(result.status).send(result.data);
+      return;
+    }
+    return { ...result.data as Record<string, unknown>, nodeName };
+  });
+
+  // Send message to agent
+  fastify.post<{
+    Params: { sessionId: string };
+    Body: { message: string };
+  }>('/agents/:sessionId/send', async (request, reply) => {
+    const { sessionId } = request.params;
+    const nodeName = sessionNodeMap.get(sessionId);
+    if (!nodeName) {
+      reply.code(404).send({ error: `Session "${sessionId}" not found in hub registry` });
+      return;
+    }
+    const result = await proxyToNode(nodeName, `/agent/${sessionId}/send`, 'POST', request.body);
+    if (!result.ok) {
+      reply.code(result.status).send(result.data);
+      return;
+    }
+    return result.data;
+  });
+
+  // Read agent output
+  fastify.get<{
+    Params: { sessionId: string };
+    Querystring: { offset?: string; limit?: string };
+  }>('/agents/:sessionId/read', async (request, reply) => {
+    const { sessionId } = request.params;
+    const nodeName = sessionNodeMap.get(sessionId);
+    if (!nodeName) {
+      reply.code(404).send({ error: `Session "${sessionId}" not found in hub registry` });
+      return;
+    }
+    const qs = new URLSearchParams();
+    if (request.query.offset) qs.set('offset', request.query.offset);
+    if (request.query.limit) qs.set('limit', request.query.limit);
+    const qsStr = qs.toString() ? `?${qs.toString()}` : '';
+    const result = await proxyToNode(nodeName, `/agent/${sessionId}/read${qsStr}`, 'GET');
+    if (!result.ok) {
+      reply.code(result.status).send(result.data);
+      return;
+    }
+    return { ...result.data as Record<string, unknown>, nodeName };
+  });
+
+  // Kill agent
+  fastify.delete<{
+    Params: { sessionId: string };
+  }>('/agents/:sessionId', async (request, reply) => {
+    const { sessionId } = request.params;
+    const nodeName = sessionNodeMap.get(sessionId);
+    if (!nodeName) {
+      reply.code(404).send({ error: `Session "${sessionId}" not found in hub registry` });
+      return;
+    }
+    const result = await proxyToNode(nodeName, `/agent/${sessionId}`, 'DELETE');
+    if (!result.ok) {
+      reply.code(result.status).send(result.data);
+      return;
+    }
+    return result.data;
+  });
+
+  // List all agents across all nodes
+  fastify.get('/agents', async () => {
+    const allAgents: Array<Record<string, unknown>> = [];
+    for (const node of registry.listNodes()) {
+      try {
+        const result = await proxyToNode(node.name, '/agents', 'GET');
+        if (result.ok) {
+          const agents = result.data as Array<Record<string, unknown>>;
+          for (const agent of agents) {
+            allAgents.push({ ...agent, nodeName: node.name });
+          }
+        }
+      } catch {
+        // Skip unreachable nodes
+      }
+    }
+    return allAgents;
+  });
+
   // ──── Task Broker ────
 
   fastify.post<{

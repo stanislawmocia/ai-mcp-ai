@@ -2,6 +2,7 @@ import Fastify from 'fastify';
 import { execHandler } from './executor.js';
 import { getHealthInfo, getCapabilities } from './monitor.js';
 import { startHeartbeat } from './heartbeat.js';
+import { createAgentManager, type AgentMode } from './agents.js';
 
 export interface NodeAgentConfig {
   name: string;
@@ -12,6 +13,7 @@ export interface NodeAgentConfig {
 
 export async function startNodeAgent(config: NodeAgentConfig) {
   const fastify = Fastify({ logger: true });
+  const agentManager = createAgentManager();
 
   // Auth middleware
   fastify.addHook('onRequest', async (request, reply) => {
@@ -42,32 +44,122 @@ export async function startNodeAgent(config: NodeAgentConfig) {
     return execHandler(cmd, workdir, timeout);
   });
 
-  // Agent lifecycle endpoints (Phase 2)
+  // ──── Agent lifecycle ────
+
+  // List all agents on this node
+  fastify.get('/agents', async () => {
+    return agentManager.list().map(s => ({
+      id: s.id,
+      tool: s.tool,
+      mode: s.mode,
+      status: s.status,
+      pid: s.pid,
+      exitCode: s.exitCode,
+      startedAt: s.startedAt,
+      endedAt: s.endedAt,
+    }));
+  });
+
+  // Start agent
   fastify.post<{
-    Body: { tool: string; workdir: string; context?: string; systemPrompt?: string };
-  }>('/start-agent', async (request) => {
-    const { tool, workdir, context, systemPrompt } = request.body;
-    // Phase 2 implementation
-    return { error: 'Not implemented yet — Phase 2', tool, workdir };
+    Body: {
+      tool: string;
+      workdir: string;
+      mode?: AgentMode;
+      args?: string[];
+      prompt?: string;
+      systemPrompt?: string;
+    };
+  }>('/start-agent', async (request, reply) => {
+    const { tool, workdir, mode, args, prompt, systemPrompt } = request.body;
+
+    // Check if tool is available
+    const caps = getCapabilities();
+    const toolName = tool === 'claude-code' ? 'claude' : tool;
+    // Allow generic commands — only warn for known tools that are missing
+    const knownTools = ['claude', 'aider', 'python3', 'node'];
+    if (knownTools.includes(toolName) && !caps.tools.includes(toolName)) {
+      reply.code(400).send({
+        error: `Tool "${tool}" is not available on this node`,
+        availableTools: caps.tools,
+      });
+      return;
+    }
+
+    const session = agentManager.start({
+      tool,
+      mode: mode ?? 'oneshot',
+      workdir,
+      args,
+      prompt,
+      systemPrompt,
+    });
+
+    return {
+      sessionId: session.id,
+      pid: session.pid,
+      status: session.status,
+      mode: session.mode,
+      tool: session.tool,
+    };
   });
 
-  fastify.get<{ Params: { id: string } }>('/agent/:id', async (request) => {
-    return { error: 'Not implemented yet — Phase 2', id: request.params.id };
+  // Get agent status
+  fastify.get<{ Params: { id: string } }>('/agent/:id', async (request, reply) => {
+    const session = agentManager.get(request.params.id);
+    if (!session) {
+      reply.code(404).send({ error: 'Agent session not found' });
+      return;
+    }
+    return {
+      id: session.id,
+      tool: session.tool,
+      mode: session.mode,
+      status: session.status,
+      pid: session.pid,
+      exitCode: session.exitCode,
+      startedAt: session.startedAt,
+      endedAt: session.endedAt,
+      lastLines: session.ringBuffer.slice(-10),
+    };
   });
 
+  // Send message to agent stdin
   fastify.post<{
     Params: { id: string };
     Body: { message: string };
-  }>('/agent/:id/send', async (request) => {
-    return { error: 'Not implemented yet — Phase 2', id: request.params.id };
+  }>('/agent/:id/send', async (request, reply) => {
+    const result = agentManager.send(request.params.id, request.body.message);
+    if (!result.ok) {
+      reply.code(400).send(result);
+      return;
+    }
+    return result;
   });
 
-  fastify.get<{ Params: { id: string } }>('/agent/:id/read', async (request) => {
-    return { error: 'Not implemented yet — Phase 2', id: request.params.id };
+  // Read agent output (ring buffer)
+  fastify.get<{
+    Params: { id: string };
+    Querystring: { offset?: string; limit?: string };
+  }>('/agent/:id/read', async (request, reply) => {
+    const offset = request.query.offset ? parseInt(request.query.offset, 10) : undefined;
+    const limit = request.query.limit ? parseInt(request.query.limit, 10) : undefined;
+    const result = agentManager.read(request.params.id, { offset, limit });
+    if (!result) {
+      reply.code(404).send({ error: 'Agent session not found' });
+      return;
+    }
+    return result;
   });
 
-  fastify.delete<{ Params: { id: string } }>('/agent/:id', async (request) => {
-    return { error: 'Not implemented yet — Phase 2', id: request.params.id };
+  // Kill agent
+  fastify.delete<{ Params: { id: string } }>('/agent/:id', async (request, reply) => {
+    const result = agentManager.kill(request.params.id);
+    if (!result.ok) {
+      reply.code(400).send(result);
+      return;
+    }
+    return result;
   });
 
   // Start server
@@ -80,6 +172,12 @@ export async function startNodeAgent(config: NodeAgentConfig) {
   // Graceful shutdown
   const shutdown = async () => {
     console.log('[meshmind-node] Shutting down...');
+    // Kill all running agents
+    for (const session of agentManager.list()) {
+      if (session.status === 'running') {
+        agentManager.kill(session.id);
+      }
+    }
     await fastify.close();
     process.exit(0);
   };
