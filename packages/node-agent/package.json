@@ -1,0 +1,25 @@
+{
+  "name": "meshmind-node",
+  "version": "1.0.0",
+  "description": "MeshMind node agent — daemon for each machine in the mesh",
+  "main": "dist/server.js",
+  "type": "module",
+  "bin": {
+    "meshmind-node": "./dist/bin/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/bin/cli.js",
+    "dev": "tsx src/bin/cli.ts"
+  },
+  "dependencies": {
+    "fastify": "^5.0.0",
+    "zod": "^3.23.8",
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
