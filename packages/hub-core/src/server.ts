@@ -59,7 +59,7 @@ export async function startHubCore(config: HubConfig) {
 
     const auth = request.headers.authorization;
     if (!auth || auth !== `Bearer ${config.token}`) {
-      reply.code(401).send({ error: 'Unauthorized' });
+      return reply.code(401).send({ error: 'Unauthorized' });
     }
   });
 
@@ -124,7 +124,7 @@ export async function startHubCore(config: HubConfig) {
       });
       return await res.json();
     } catch (error) {
-      reply.code(502).send({
+      return reply.code(502).send({
         error: `Failed to reach node "${nodeName}" at ${nodeUrl}`,
         details: (error as Error).message,
       });

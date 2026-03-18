@@ -25,7 +25,7 @@ export async function startNodeAgent(config: NodeAgentConfig) {
 
     const auth = request.headers.authorization;
     if (!auth || auth !== `Bearer ${config.token}`) {
-      reply.code(401).send({ error: 'Unauthorized' });
+      return reply.code(401).send({ error: 'Unauthorized' });
     }
   });
 

@@ -104,11 +104,13 @@ program
   .option('-m, --mode <mode>', 'Agent mode: oneshot or interactive', 'oneshot')
   .option('-p, --prompt <prompt>', 'Prompt for oneshot mode')
   .option('--system-prompt <sp>', 'System prompt for Claude Code')
+  .option('--timeout <ms>', 'Oneshot timeout in ms (default: 300000 = 5min)')
   .action(async (node: string, tool: string, opts: {
     workdir: string;
     mode: string;
     prompt?: string;
     systemPrompt?: string;
+    timeout?: string;
   }) => {
     try {
       const res = await hubFetch('/agents/spawn', {
@@ -120,6 +122,7 @@ program
           mode: opts.mode,
           prompt: opts.prompt,
           systemPrompt: opts.systemPrompt,
+          timeoutMs: opts.timeout ? parseInt(opts.timeout, 10) : undefined,
         }),
       });
 
@@ -148,24 +151,25 @@ program
     try {
       const printOutput = async () => {
         const res = await hubFetch(`/agents/${encodeURIComponent(sessionId)}/read`);
+        const result = await res.json() as {
+          lines?: string[];
+          total?: number;
+          isRunning?: boolean;
+          status?: string;
+          exitCode?: number | null;
+          nodeName?: string;
+          error?: string;
+        };
+
         if (!res.ok) {
-          const err = await res.json() as { error?: string };
-          console.error(`Error: ${err.error ?? 'Unknown'}`);
+          console.error(`Error: ${result.error ?? 'Unknown'}`);
           return false;
         }
-        const result = await res.json() as {
-          lines: string[];
-          total: number;
-          isRunning: boolean;
-          status: string;
-          exitCode: number | null;
-          nodeName: string;
-        };
 
         console.log(`[${sessionId}] Status: ${result.status} | Node: ${result.nodeName}`);
         if (result.exitCode !== null) console.log(`Exit code: ${result.exitCode}`);
         console.log(`--- output (${result.total} lines in buffer) ---`);
-        for (const line of result.lines) {
+        for (const line of result.lines ?? []) {
           console.log(line);
         }
         return result.isRunning;
@@ -269,11 +273,14 @@ program
     }
   });
 
-// hub context get <key>
-program
+// hub context get <key> / hub context set <key> <json>
+const contextCmd = program
   .command('context')
-  .description('Manage shared context')
+  .description('Manage shared context');
+
+contextCmd
   .command('get <key>')
+  .description('Get a context value by key')
   .action(async (key: string) => {
     try {
       const res = await hubFetch(`/context/${encodeURIComponent(key)}`);
@@ -283,6 +290,52 @@ program
       }
       const entry = await res.json();
       console.log(JSON.stringify(entry, null, 2));
+    } catch (error) {
+      console.error('Failed:', (error as Error).message);
+      process.exit(1);
+    }
+  });
+
+contextCmd
+  .command('set <key> <json>')
+  .description('Set a context value')
+  .option('--ttl <hours>', 'Time-to-live in hours')
+  .option('--share <nodes>', 'Comma-separated node names to share with')
+  .action(async (key: string, json: string, opts: { ttl?: string; share?: string }) => {
+    try {
+      const data = JSON.parse(json);
+      const res = await hubFetch('/context', {
+        method: 'POST',
+        body: JSON.stringify({
+          key,
+          data,
+          ttlHours: opts.ttl ? parseInt(opts.ttl, 10) : undefined,
+          sharedWith: opts.share ? opts.share.split(',') : undefined,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json() as { error?: string };
+        console.error(`Error: ${err.error ?? 'Unknown'}`);
+        process.exit(1);
+      }
+      console.log(`Context "${key}" saved.`);
+    } catch (error) {
+      console.error('Failed:', (error as Error).message);
+      process.exit(1);
+    }
+  });
+
+contextCmd
+  .command('delete <key>')
+  .description('Delete a context value')
+  .action(async (key: string) => {
+    try {
+      const res = await hubFetch(`/context/${encodeURIComponent(key)}`, { method: 'DELETE' });
+      if (!res.ok) {
+        console.error(`Error deleting context "${key}".`);
+        process.exit(1);
+      }
+      console.log(`Context "${key}" deleted.`);
     } catch (error) {
       console.error('Failed:', (error as Error).message);
       process.exit(1);
