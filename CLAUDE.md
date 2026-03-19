@@ -49,6 +49,14 @@ docker compose up -d
 
 All services use `Bearer <HUB_TOKEN>` from `.env`.
 
+**MCP client connection** requires OAuth 2.0 (Claude Code mandates this for remote SSE servers).
+The hub implements a no-op OAuth server that auto-approves everything — Tailscale handles real security.
+Connect with: `claude mcp add --transport sse meshmind http://<hub-tailscale-ip>:7434/sse`
+
+## Runtime
+
+The hub runs on **Bun** (not Node.js). Uses `bun:sqlite` (built-in) — no native modules, works in Alpine Docker.
+
 ## MCP Tools
 
 - `list_nodes` — list all mesh nodes

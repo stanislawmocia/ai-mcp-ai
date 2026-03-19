@@ -8,7 +8,7 @@
 
 ---
 
-## 1. Hub Server (HP Server) — one-time setup
+## 1. Hub Server — one-time setup
 
 ```bash
 # Clone repo
@@ -16,7 +16,8 @@ git clone <repo-url> meshmind && cd meshmind
 
 # Create .env
 cp .env.example .env
-# Edit .env — set a strong HUB_TOKEN (use: openssl rand -hex 32)
+# Edit .env — at minimum set HUB_TOKEN:
+#   openssl rand -hex 32
 
 # Start hub-core + hub-mcp (always-on services)
 docker compose up -d
@@ -36,38 +37,22 @@ Hub is now running:
 docker compose --profile with-local-node up -d
 ```
 
+Set `NODE_NAME` in `.env` to whatever you want this machine called in the mesh (default: `hp-server`).
+
 ---
 
 ## 2. Add a new machine to the mesh
 
-### Option A: Install script (recommended)
-
-On the new machine:
-
-```bash
-git clone <repo-url> meshmind && cd meshmind
-
-./scripts/install-node.sh \
-  --hub http://<hub-tailscale-ip>:7433 \
-  --token <YOUR_HUB_TOKEN> \
-  --name alienware
-```
-
-This creates `~/.meshmind/` with docker-compose and management scripts:
-- `~/.meshmind/start.sh` — start the agent
-- `~/.meshmind/stop.sh` — stop the agent
-- `~/.meshmind/logs.sh` — view logs
-
-### Option B: Manual docker-compose
+Clone the repo on the remote machine, then:
 
 ```bash
 HUB_URL=http://<hub-tailscale-ip>:7433 \
-HUB_TOKEN=<token> \
+HUB_TOKEN=<YOUR_HUB_TOKEN> \
 NODE_NAME=alienware \
-docker compose -f docker-compose.node.yml up -d
+docker compose -f docker-compose.node.yml up -d --build
 ```
 
-### Option C: Direct (no Docker)
+Or without Docker:
 
 ```bash
 cd packages/node-agent
@@ -78,6 +63,8 @@ bun run src/bin/cli.ts \
   --token <YOUR_HUB_TOKEN> \
   --port 7432
 ```
+
+> **Docker socket** — the node-agent mounts `/var/run/docker.sock` so `exec_on` can run `docker` commands. This requires the user running Docker to have socket access.
 
 ---
 
@@ -99,20 +86,65 @@ You should see all connected nodes with their Tailscale IPs and available tools.
 
 ## 4. Connect Claude via MCP
 
-Add to your Claude MCP config (`~/.claude/mcp.json` or IDE settings):
+On any device (with Claude Code installed and connected to the same Tailscale network):
+
+```bash
+claude mcp add --transport sse meshmind http://<hub-tailscale-ip>:7434/sse
+```
+
+Claude Code will open a browser window for a one-time OAuth authorization flow. The hub auto-approves it — real security is handled by Tailscale (only devices on your tailnet can reach port 7434). After authorization, Claude has access to all MeshMind tools.
+
+To verify the connection:
+
+```bash
+claude /mcp
+# Should show: meshmind — connected
+```
+
+> **Note:** The `headers` approach (Authorization: Bearer) does not work with Claude Code — it requires OAuth 2.0 for remote SSE MCP servers. The hub implements a no-op OAuth server for this purpose.
+
+### Connect from browser-based IDEs (Cursor, Windsurf, VSCode)
+
+MCP SSE endpoint: `http://<hub-tailscale-ip>:7434/sse`
+
+**Cursor** — `~/.cursor/mcp.json`:
 
 ```json
 {
   "mcpServers": {
     "meshmind": {
-      "url": "http://<hub-tailscale-ip>:7434/sse",
-      "headers": {
-        "Authorization": "Bearer <YOUR_HUB_TOKEN>"
-      }
+      "url": "http://<hub-tailscale-ip>:7434/sse"
     }
   }
 }
 ```
+
+**Windsurf** — `~/.codeium/windsurf/mcp_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "meshmind": {
+      "serverUrl": "http://<hub-tailscale-ip>:7434/sse"
+    }
+  }
+}
+```
+
+**VSCode (GitHub Copilot / Claude extension)** — `.vscode/mcp.json`:
+
+```json
+{
+  "servers": {
+    "meshmind": {
+      "type": "sse",
+      "url": "http://<hub-tailscale-ip>:7434/sse"
+    }
+  }
+}
+```
+
+On first connection the client opens a browser for the OAuth flow — hub auto-approves. Subsequent connections are automatic. Tailscale ensures only machines on your tailnet can reach port 7434.
 
 ### Available MCP tools
 
@@ -131,7 +163,53 @@ Add to your Claude MCP config (`~/.claude/mcp.json` or IDE settings):
 
 ---
 
-## 5. CLI Commands
+## 5. Command restrictions (exec_on)
+
+Each node-agent can restrict which shell commands are allowed via two env variables. Set them in `.env` (hub's local node) or pass them when starting a remote node.
+
+### EXEC_ALLOWLIST — whitelist
+
+Only the listed binaries are permitted. Everything else is rejected.
+
+```env
+EXEC_ALLOWLIST=docker,git,ls,cat,head,tail,curl,wget,uname,df,free,ps
+```
+
+### EXEC_DENYLIST — blacklist
+
+These binaries are always blocked, regardless of allowlist.
+
+```env
+EXEC_DENYLIST=rm,dd,mkfs,fdisk,chmod,chown,reboot,shutdown,poweroff
+```
+
+### Rules
+
+- Both variables are **optional** — leave empty to allow all commands (default).
+- `EXEC_DENYLIST` is checked **before** `EXEC_ALLOWLIST`.
+- Matching is by **binary name only** — paths and arguments are ignored (`/usr/bin/docker ps` → checks `docker`).
+- A blocked command returns exit code `1` with an error message in stderr.
+
+### Remote node with restrictions
+
+```bash
+HUB_URL=http://<hub-tailscale-ip>:7433 \
+HUB_TOKEN=<TOKEN> \
+NODE_NAME=alienware \
+EXEC_ALLOWLIST=docker,nvidia-smi,git \
+EXEC_DENYLIST=rm,shutdown \
+docker compose -f docker-compose.node.yml up -d --build
+```
+
+After changing `.env`, restart the node-agent to apply:
+
+```bash
+docker compose --profile with-local-node up -d node-agent-local
+```
+
+---
+
+## 6. CLI Commands
 
 ```bash
 export HUB_URL=http://localhost:7433
@@ -156,7 +234,7 @@ hub kill <session-id>              # kill agent
 
 ---
 
-## 6. Development (local, without Docker)
+## 7. Development (local, without Docker)
 
 ```bash
 # Install deps

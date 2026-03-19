@@ -58,7 +58,8 @@ const TOOL_COMMANDS: Record<string, { cmd: string; defaultArgs: string[] }> = {
   'aider': { cmd: 'aider', defaultArgs: [] },
   'python': { cmd: 'python3', defaultArgs: ['-u'] },
   'node': { cmd: 'node', defaultArgs: ['-i'] },
-  'bash': { cmd: 'bash', defaultArgs: [] },
+  'bash': { cmd: '/bin/sh', defaultArgs: [] },
+  'sh': { cmd: '/bin/sh', defaultArgs: [] },
 };
 
 function resolveCommand(tool: string, mode: AgentMode, opts: AgentStartOpts): { cmd: string; args: string[] } {
@@ -191,7 +192,7 @@ export function createAgentManager(): AgentManager {
       try {
         const proc = spawn(cmd, args, {
           cwd: opts.workdir,
-          shell: true,
+          shell: false,
           stdio: ['pipe', 'pipe', 'pipe'],
           env: { ...process.env, TERM: 'dumb', NO_COLOR: '1' },
         });

@@ -19,8 +19,11 @@ services:
       HUB_URL: ${HUB_URL}
       HUB_TOKEN: ${HUB_TOKEN}
       AGENT_PORT: ${AGENT_PORT:-7432}
+      EXEC_ALLOWLIST: ${EXEC_ALLOWLIST:-}
+      EXEC_DENYLIST: ${EXEC_DENYLIST:-}
     volumes:
       - agent_logs:/tmp/meshmind-agents
+      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
 
 volumes:

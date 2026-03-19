@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import type Database from 'better-sqlite3';
+import type { Database } from 'bun:sqlite';
 
 export interface Task {
   id: string;
@@ -19,7 +19,7 @@ export interface TaskBroker {
   listTasks(status?: Task['status']): Task[];
 }
 
-export function createBroker(db: Database.Database): TaskBroker {
+export function createBroker(db: Database): TaskBroker {
   const insertStmt = db.prepare(`
     INSERT INTO tasks (id, type, node_name, payload, status)
     VALUES (?, ?, ?, ?, 'pending')

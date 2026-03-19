@@ -43,7 +43,7 @@ services:
 
   # ──── Node agent (one per machine) ────
   # On the hub server itself, runs with host networking
-  # For remote machines, use: ./scripts/install-node.sh
+  # For remote machines, use: docker-compose.node.yml
 
   node-agent-local:
     build:
@@ -56,8 +56,11 @@ services:
       HUB_URL: http://localhost:7433
       HUB_TOKEN: ${HUB_TOKEN}
       AGENT_PORT: "7432"
+      EXEC_ALLOWLIST: ${EXEC_ALLOWLIST:-}
+      EXEC_DENYLIST: ${EXEC_DENYLIST:-}
     volumes:
       - agent_logs:/tmp/meshmind-agents
+      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
     depends_on:
       hub-core:

@@ -1,5 +1,5 @@
 import Fastify from 'fastify';
-import type Database from 'better-sqlite3';
+import type { Database } from 'bun:sqlite';
 import { initDb } from './db.js';
 import { createRegistry } from './registry.js';
 import { createBroker } from './broker.js';
@@ -13,7 +13,7 @@ export interface HubConfig {
 
 // ──── Session-to-Node SQLite store ────
 
-function createSessionStore(db: Database.Database) {
+function createSessionStore(db: Database) {
   const stmts = {
     upsert: db.prepare(`
       INSERT INTO agent_sessions (session_id, node_name, tool, mode, status)
@@ -146,13 +146,14 @@ export async function startHubCore(config: HubConfig) {
 
     const nodeUrl = `http://${node.tailscaleIp}:${node.port}${path}`;
     try {
+      const hasBody = body !== undefined;
       const res = await fetch(nodeUrl, {
         method,
         headers: {
-          'Content-Type': 'application/json',
+          ...(hasBody ? { 'Content-Type': 'application/json' } : {}),
           'Authorization': `Bearer ${config.token}`,
         },
-        body: body ? JSON.stringify(body) : undefined,
+        body: hasBody ? JSON.stringify(body) : undefined,
       });
       const data = await res.json();
       return { ok: res.ok, status: res.status, data };

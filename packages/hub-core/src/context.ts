@@ -1,4 +1,4 @@
-import type Database from 'better-sqlite3';
+import type { Database } from 'bun:sqlite';
 
 export interface ContextEntry {
   key: string;
@@ -15,7 +15,7 @@ export interface ContextStore {
   remove(key: string): void;
 }
 
-export function createContextStore(db: Database.Database): ContextStore {
+export function createContextStore(db: Database): ContextStore {
   const upsertStmt = db.prepare(`
     INSERT INTO context (key, data, shared_with, expires_at, updated_at)
     VALUES (?, ?, ?, ?, datetime('now'))

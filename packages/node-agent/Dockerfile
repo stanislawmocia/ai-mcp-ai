@@ -8,7 +8,7 @@ RUN bun build src/bin/cli.ts --outdir ./dist/bin --target bun && \
     bun build src/server.ts --outdir ./dist --target bun
 
 FROM oven/bun:1-alpine
-RUN apk add --no-cache git curl
+RUN apk add --no-cache git curl docker-cli
 WORKDIR /app
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules ./node_modules
