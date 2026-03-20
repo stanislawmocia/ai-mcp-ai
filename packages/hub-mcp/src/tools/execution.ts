@@ -5,10 +5,10 @@ import type { HubClient } from '../index.js';
 export function registerExecutionTools(server: McpServer, hub: HubClient) {
   server.tool(
     'exec_on',
-    'Execute a shell command on a remote node. Returns stdout, stderr, exit code, and duration.',
+    'Execute a command on a remote node. Returns stdout, stderr, exit code, and duration. Shell operators (;|&) are blocked — use separate calls instead of chaining.',
     {
       nodeName: z.string().describe('Target node name'),
-      command: z.string().describe('Shell command to execute'),
+      command: z.string().describe('Command to execute (no shell operators like ;|&)'),
       workdir: z.string().optional().describe('Working directory on the remote node'),
       timeout: z.number().optional().describe('Timeout in milliseconds (max 300000)'),
     },

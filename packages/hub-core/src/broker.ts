@@ -1,6 +1,8 @@
 import crypto from 'node:crypto';
 import type { Database } from 'bun:sqlite';
 
+const LIST_LIMIT = 100;
+
 export interface Task {
   id: string;
   type: string;
@@ -19,42 +21,39 @@ export interface TaskBroker {
   listTasks(status?: Task['status']): Task[];
 }
 
+function rowToTask(row: Record<string, unknown>): Task {
+  return {
+    id: row.id as string,
+    type: row.type as string,
+    nodeName: row.node_name as string,
+    payload: JSON.parse(row.payload as string),
+    status: row.status as Task['status'],
+    result: row.result ? JSON.parse(row.result as string) : null,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+  };
+}
+
 export function createBroker(db: Database): TaskBroker {
-  const insertStmt = db.prepare(`
-    INSERT INTO tasks (id, type, node_name, payload, status)
-    VALUES (?, ?, ?, ?, 'pending')
-  `);
-
-  const getStmt = db.prepare('SELECT * FROM tasks WHERE id = ?');
-
-  const updateStmt = db.prepare(`
-    UPDATE tasks SET status = ?, result = ?, updated_at = datetime('now')
-    WHERE id = ?
-  `);
-
-  const listAllStmt = db.prepare('SELECT * FROM tasks ORDER BY created_at DESC LIMIT 100');
-  const listByStatusStmt = db.prepare(
-    'SELECT * FROM tasks WHERE status = ? ORDER BY created_at DESC LIMIT 100',
+  const insertStmt = db.prepare(
+    `INSERT INTO tasks (id, type, node_name, payload, status) VALUES (?, ?, ?, ?, 'pending')`,
   );
-
-  function rowToTask(row: Record<string, unknown>): Task {
-    return {
-      id: row.id as string,
-      type: row.type as string,
-      nodeName: row.node_name as string,
-      payload: JSON.parse(row.payload as string),
-      status: row.status as Task['status'],
-      result: row.result ? JSON.parse(row.result as string) : null,
-      createdAt: row.created_at as string,
-      updatedAt: row.updated_at as string,
-    };
-  }
+  const getStmt = db.prepare('SELECT * FROM tasks WHERE id = ?');
+  const updateStmt = db.prepare(
+    `UPDATE tasks SET status = ?, result = ?, updated_at = datetime('now') WHERE id = ?`,
+  );
+  const listAllStmt = db.prepare(`SELECT * FROM tasks ORDER BY created_at DESC LIMIT ${LIST_LIMIT}`);
+  const listByStatusStmt = db.prepare(
+    `SELECT * FROM tasks WHERE status = ? ORDER BY created_at DESC LIMIT ${LIST_LIMIT}`,
+  );
 
   return {
     createTask(type, nodeName, payload) {
       const id = `task-${crypto.randomUUID().slice(0, 8)}`;
       insertStmt.run(id, type, nodeName, JSON.stringify(payload));
-      return this.getTask(id)!;
+      const task = this.getTask(id);
+      if (!task) throw new Error(`Failed to create task ${id}`);
+      return task;
     },
 
     getTask(id) {
@@ -67,10 +66,7 @@ export function createBroker(db: Database): TaskBroker {
     },
 
     listTasks(status?) {
-      const rows = (status ? listByStatusStmt.all(status) : listAllStmt.all()) as Record<
-        string,
-        unknown
-      >[];
+      const rows = (status ? listByStatusStmt.all(status) : listAllStmt.all()) as Record<string, unknown>[];
       return rows.map(rowToTask);
     },
   };

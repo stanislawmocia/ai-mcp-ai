@@ -3,9 +3,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
-const RING_SIZE = 100;
+// ──── Constants ────
+
+const RING_BUFFER_SIZE = 100;
 const LOG_DIR = process.env.AGENT_LOG_DIR ?? '/tmp/meshmind-agents';
-const DEFAULT_ONESHOT_TIMEOUT = 5 * 60 * 1000; // 5 minutes
+const DEFAULT_ONESHOT_TIMEOUT_MS = 5 * 60_000;
+const KILL_GRACE_PERIOD_MS = 5_000;
+const SESSION_RETENTION_MS = 60 * 60_000; // keep finished sessions for 1 hour
+const CLEANUP_INTERVAL_MS = 5 * 60_000;
+
+// ──── Types ────
 
 export type AgentMode = 'oneshot' | 'interactive';
 export type AgentStatus = 'starting' | 'running' | 'done' | 'failed' | 'killed' | 'timeout';
@@ -32,7 +39,7 @@ export interface AgentStartOpts {
   args?: string[];
   prompt?: string;
   systemPrompt?: string;
-  timeoutMs?: number; // oneshot timeout in ms, default 5min
+  timeoutMs?: number;
 }
 
 export interface AgentManager {
@@ -51,44 +58,35 @@ export interface AgentManager {
   runningIds(): string[];
 }
 
-// Map tool names to actual commands
-const TOOL_COMMANDS: Record<string, { cmd: string; defaultArgs: string[] }> = {
-  'claude-code': { cmd: 'claude', defaultArgs: ['--print'] },
-  'claude': { cmd: 'claude', defaultArgs: ['--print'] },
-  'aider': { cmd: 'aider', defaultArgs: [] },
-  'python': { cmd: 'python3', defaultArgs: ['-u'] },
-  'node': { cmd: 'node', defaultArgs: ['-i'] },
-  'bash': { cmd: '/bin/sh', defaultArgs: [] },
-  'sh': { cmd: '/bin/sh', defaultArgs: [] },
-};
+// ──── Tool Resolution ────
 
 function resolveCommand(tool: string, mode: AgentMode, opts: AgentStartOpts): { cmd: string; args: string[] } {
   if (tool === 'claude-code' || tool === 'claude') {
-    if (mode === 'oneshot') {
-      const args = ['--print'];
-      if (opts.systemPrompt) {
-        args.push('--system-prompt', opts.systemPrompt);
-      }
-      if (opts.prompt) {
-        args.push(opts.prompt);
-      }
-      return { cmd: 'claude', args };
-    } else {
-      const args: string[] = [];
-      if (opts.systemPrompt) {
-        args.push('--system-prompt', opts.systemPrompt);
-      }
-      return { cmd: 'claude', args };
-    }
+    const args: string[] = [];
+    if (mode === 'oneshot') args.push('--print');
+    if (opts.systemPrompt) args.push('--system-prompt', opts.systemPrompt);
+    if (mode === 'oneshot' && opts.prompt) args.push(opts.prompt);
+    return { cmd: 'claude', args };
   }
 
-  const known = TOOL_COMMANDS[tool];
+  const toolMap: Record<string, { cmd: string; defaultArgs: string[] }> = {
+    aider:   { cmd: 'aider',   defaultArgs: [] },
+    python:  { cmd: 'python3', defaultArgs: ['-u'] },
+    python3: { cmd: 'python3', defaultArgs: ['-u'] },
+    node:    { cmd: 'node',    defaultArgs: ['-i'] },
+    bash:    { cmd: '/bin/sh', defaultArgs: [] },
+    sh:      { cmd: '/bin/sh', defaultArgs: [] },
+  };
+
+  const known = toolMap[tool];
   if (known) {
     return { cmd: known.cmd, args: [...known.defaultArgs, ...(opts.args ?? [])] };
   }
 
   return { cmd: tool, args: opts.args ?? [] };
 }
+
+// ──── Agent Manager ────
 
 export function createAgentManager(): AgentManager {
   const sessions = new Map<string, AgentSession>();
@@ -99,15 +97,31 @@ export function createAgentManager(): AgentManager {
     fs.mkdirSync(LOG_DIR, { recursive: true });
   }
 
+  // Cleanup finished sessions to prevent memory leak
+  setInterval(() => {
+    const now = Date.now();
+    for (const [id, session] of sessions) {
+      if (session.endedAt && now - new Date(session.endedAt).getTime() > SESSION_RETENTION_MS) {
+        sessions.delete(id);
+        processes.delete(id); // safety
+        timers.delete(id);    // safety
+      }
+    }
+  }, CLEANUP_INTERVAL_MS).unref();
+
   function appendToRing(session: AgentSession, line: string) {
     session.ringBuffer.push(line);
-    if (session.ringBuffer.length > RING_SIZE) {
+    if (session.ringBuffer.length > RING_BUFFER_SIZE) {
       session.ringBuffer.shift();
     }
   }
 
   function appendToLog(session: AgentSession, data: string) {
-    fs.appendFileSync(session.logFile, data);
+    try {
+      fs.appendFileSync(session.logFile, data);
+    } catch {
+      // Logging failure shouldn't crash the agent
+    }
   }
 
   function clearTimer(id: string) {
@@ -118,38 +132,40 @@ export function createAgentManager(): AgentManager {
     }
   }
 
-  function setupProcessHandlers(id: string, proc: ChildProcess, session: AgentSession) {
-    proc.stdout?.on('data', (chunk: Buffer) => {
-      const text = chunk.toString();
-      appendToLog(session, text);
-      for (const line of text.split('\n')) {
-        if (line.length > 0) {
-          appendToRing(session, line);
-        }
+  function killProcess(id: string, proc: ChildProcess) {
+    proc.kill('SIGTERM');
+    const forceKill = setTimeout(() => {
+      if (processes.has(id)) {
+        proc.kill('SIGKILL');
       }
-    });
+    }, KILL_GRACE_PERIOD_MS);
+    forceKill.unref();
+  }
 
-    proc.stderr?.on('data', (chunk: Buffer) => {
+  function setupProcessHandlers(id: string, proc: ChildProcess, session: AgentSession) {
+    const handleOutput = (stream: 'stdout' | 'stderr') => (chunk: Buffer) => {
       const text = chunk.toString();
-      appendToLog(session, `[stderr] ${text}`);
+      const prefix = stream === 'stderr' ? '[stderr] ' : '';
+      appendToLog(session, prefix ? `${prefix}${text}` : text);
       for (const line of text.split('\n')) {
         if (line.length > 0) {
-          appendToRing(session, `[stderr] ${line}`);
+          appendToRing(session, `${prefix}${line}`);
         }
       }
-    });
+    };
+
+    proc.stdout?.on('data', handleOutput('stdout'));
+    proc.stderr?.on('data', handleOutput('stderr'));
 
     proc.on('close', (code, signal) => {
       clearTimer(id);
       session.exitCode = code;
       session.endedAt = new Date().toISOString();
-      if (session.status === 'timeout') {
-        // already set by timeout handler
-      } else {
-        session.status = signal === 'SIGKILL' || signal === 'SIGTERM' ? 'killed'
+      if (session.status !== 'timeout') {
+        session.status = (signal === 'SIGKILL' || signal === 'SIGTERM') ? 'killed'
           : code === 0 ? 'done' : 'failed';
       }
-      appendToRing(session, `[agent] Process exited: code=${code} signal=${signal}`);
+      appendToRing(session, `[agent] Exited: code=${code} signal=${signal}`);
       processes.delete(id);
     });
 
@@ -167,26 +183,16 @@ export function createAgentManager(): AgentManager {
       const id = `agent-${crypto.randomUUID().slice(0, 8)}`;
       const logFile = path.join(LOG_DIR, `${id}.log`);
       const { cmd, args } = resolveCommand(opts.tool, opts.mode, opts);
-
       const timeoutMs = opts.mode === 'oneshot'
-        ? (opts.timeoutMs ?? DEFAULT_ONESHOT_TIMEOUT)
-        : null; // interactive has no auto-timeout
+        ? (opts.timeoutMs ?? DEFAULT_ONESHOT_TIMEOUT_MS)
+        : null;
 
       const session: AgentSession = {
-        id,
-        tool: opts.tool,
-        mode: opts.mode,
-        workdir: opts.workdir,
-        pid: null,
-        status: 'starting',
-        exitCode: null,
-        startedAt: new Date().toISOString(),
-        endedAt: null,
-        ringBuffer: [],
-        logFile,
-        timeoutMs,
+        id, tool: opts.tool, mode: opts.mode, workdir: opts.workdir,
+        pid: null, status: 'starting', exitCode: null,
+        startedAt: new Date().toISOString(), endedAt: null,
+        ringBuffer: [], logFile, timeoutMs,
       };
-
       sessions.set(id, session);
 
       try {
@@ -206,18 +212,12 @@ export function createAgentManager(): AgentManager {
 
         setupProcessHandlers(id, proc, session);
 
-        // Oneshot timeout
         if (timeoutMs) {
           const timer = setTimeout(() => {
             if (session.status === 'running') {
               session.status = 'timeout';
-              appendToRing(session, `[agent] Timeout after ${timeoutMs}ms — killing process`);
-              proc.kill('SIGTERM');
-              setTimeout(() => {
-                if (processes.has(id)) {
-                  proc.kill('SIGKILL');
-                }
-              }, 5000).unref();
+              appendToRing(session, `[agent] Timeout after ${timeoutMs}ms`);
+              killProcess(id, proc);
             }
             timers.delete(id);
           }, timeoutMs);
@@ -240,7 +240,7 @@ export function createAgentManager(): AgentManager {
     send(id, message) {
       const session = sessions.get(id);
       if (!session) return { ok: false, error: 'Session not found' };
-      if (session.status !== 'running') return { ok: false, error: `Agent is ${session.status}, cannot send` };
+      if (session.status !== 'running') return { ok: false, error: `Agent is ${session.status}` };
 
       const proc = processes.get(id);
       if (!proc?.stdin?.writable) return { ok: false, error: 'stdin not writable' };
@@ -256,11 +256,9 @@ export function createAgentManager(): AgentManager {
       if (!session) return null;
 
       const offset = opts?.offset ?? 0;
-      const limit = opts?.limit ?? RING_SIZE;
-      const lines = session.ringBuffer.slice(offset, offset + limit);
-
+      const limit = opts?.limit ?? RING_BUFFER_SIZE;
       return {
-        lines,
+        lines: session.ringBuffer.slice(offset, offset + limit),
         total: session.ringBuffer.length,
         isRunning: session.status === 'running',
         status: session.status,
@@ -273,28 +271,12 @@ export function createAgentManager(): AgentManager {
       if (!session) return { ok: false, error: 'Session not found' };
 
       clearTimer(id);
-
       const proc = processes.get(id);
-      if (!proc) return { ok: true };
-
-      proc.kill('SIGTERM');
-      setTimeout(() => {
-        if (processes.has(id)) {
-          proc.kill('SIGKILL');
-        }
-      }, 5000).unref();
-
+      if (proc) killProcess(id, proc);
       return { ok: true };
     },
 
-    list() {
-      return Array.from(sessions.values());
-    },
-
-    runningIds() {
-      return Array.from(sessions.values())
-        .filter(s => s.status === 'running')
-        .map(s => s.id);
-    },
+    list: () => Array.from(sessions.values()),
+    runningIds: () => Array.from(sessions.values()).filter(s => s.status === 'running').map(s => s.id),
   };
 }

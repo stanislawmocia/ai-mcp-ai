@@ -1,5 +1,7 @@
 import type { Database } from 'bun:sqlite';
 
+const CLEANUP_INTERVAL_MS = 60_000;
+
 export interface ContextEntry {
   key: string;
   data: unknown;
@@ -33,10 +35,18 @@ export function createContextStore(db: Database): ContextStore {
 
   const deleteStmt = db.prepare('DELETE FROM context WHERE key = ?');
 
-  // Cleanup expired entries periodically
+  const cleanupStmt = db.prepare(
+    "DELETE FROM context WHERE expires_at IS NOT NULL AND expires_at <= datetime('now')",
+  );
+
+  // Cleanup expired entries
   setInterval(() => {
-    db.prepare("DELETE FROM context WHERE expires_at IS NOT NULL AND expires_at <= datetime('now')").run();
-  }, 60_000).unref();
+    try {
+      cleanupStmt.run();
+    } catch (err) {
+      console.error('[context] Cleanup error:', err);
+    }
+  }, CLEANUP_INTERVAL_MS).unref();
 
   function rowToEntry(row: Record<string, unknown>): ContextEntry {
     return {
@@ -52,14 +62,9 @@ export function createContextStore(db: Database): ContextStore {
   return {
     set(key, data, sharedWith, ttlHours) {
       const expiresAt = ttlHours
-        ? new Date(Date.now() + ttlHours * 3600_000).toISOString()
+        ? new Date(Date.now() + ttlHours * 3_600_000).toISOString()
         : null;
-      upsertStmt.run(
-        key,
-        JSON.stringify(data),
-        sharedWith ? JSON.stringify(sharedWith) : null,
-        expiresAt,
-      );
+      upsertStmt.run(key, JSON.stringify(data), sharedWith ? JSON.stringify(sharedWith) : null, expiresAt);
     },
 
     get(key) {

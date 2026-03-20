@@ -1,3 +1,6 @@
+const OFFLINE_THRESHOLD_MS = 90_000; // 90s (3 missed heartbeats)
+const STATUS_CHECK_INTERVAL_MS = 15_000;
+
 export interface NodeInfo {
   name: string;
   tailscaleIp: string;
@@ -5,7 +8,7 @@ export interface NodeInfo {
   lastSeen: Date;
   health: Record<string, unknown>;
   capabilities: Record<string, unknown>;
-  status: 'online' | 'offline' | 'unreachable';
+  status: 'online' | 'offline';
 }
 
 export interface NodeRegistry {
@@ -20,48 +23,40 @@ export interface NodeRegistry {
   listNodes(): NodeInfo[];
 }
 
-const OFFLINE_THRESHOLD = 90_000; // 90s (3 missed heartbeats)
-
 export function createRegistry(): NodeRegistry {
   const nodes = new Map<string, NodeInfo>();
 
-  // Periodic status check
+  // Mark stale nodes as offline
   setInterval(() => {
-    const now = Date.now();
-    for (const node of nodes.values()) {
-      const age = now - node.lastSeen.getTime();
-      if (age > OFFLINE_THRESHOLD) {
-        node.status = 'offline';
+    try {
+      const now = Date.now();
+      for (const node of nodes.values()) {
+        if (now - node.lastSeen.getTime() > OFFLINE_THRESHOLD_MS) {
+          node.status = 'offline';
+        }
       }
+    } catch (err) {
+      console.error('[registry] Status check error:', err);
     }
-  }, 15_000).unref();
+  }, STATUS_CHECK_INTERVAL_MS).unref();
 
   return {
     registerOrUpdate(name, ip, port, health, capabilities) {
       nodes.set(name, {
-        name,
-        tailscaleIp: ip,
-        port,
-        lastSeen: new Date(),
-        health,
-        capabilities,
-        status: 'online',
+        name, tailscaleIp: ip, port, lastSeen: new Date(),
+        health, capabilities, status: 'online',
       });
     },
 
     getNode(name) {
       const node = nodes.get(name);
       if (!node) return undefined;
-      // Refresh status on access
-      const age = Date.now() - node.lastSeen.getTime();
-      if (age > OFFLINE_THRESHOLD) {
+      if (Date.now() - node.lastSeen.getTime() > OFFLINE_THRESHOLD_MS) {
         node.status = 'offline';
       }
       return node;
     },
 
-    listNodes() {
-      return Array.from(nodes.values());
-    },
+    listNodes: () => Array.from(nodes.values()),
   };
 }

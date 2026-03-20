@@ -55,7 +55,8 @@ function timingSafeEqual(a: string, b: string): boolean {
   return result === 0;
 }
 
-// Allowed tools for agent spawning
+const MAX_CONCURRENT_AGENTS = 5;
+
 const ALLOWED_AGENT_TOOLS = new Set([
   'claude-code', 'claude', 'aider',
   'python', 'python3', 'node',
@@ -184,11 +185,10 @@ export async function startNodeAgent(config: NodeAgentConfig) {
       return;
     }
 
-    // Check if tool is available on this node
+    // Check if tool binary is available on this node
     const caps = getCapabilities();
-    const toolName = tool === 'claude-code' ? 'claude' : tool;
-    const knownTools = ['claude', 'aider', 'python3', 'node'];
-    if (knownTools.includes(toolName) && !caps.tools.includes(toolName)) {
+    const binaryName = tool === 'claude-code' ? 'claude' : tool;
+    if (!caps.tools.includes(binaryName) && ['claude', 'aider', 'python3', 'node'].includes(binaryName)) {
       reply.code(400).send({
         error: `Tool "${tool}" is not available on this node`,
         availableTools: caps.tools,
@@ -198,9 +198,9 @@ export async function startNodeAgent(config: NodeAgentConfig) {
 
     // Limit concurrent agents
     const runningCount = agentManager.runningIds().length;
-    if (runningCount >= 5) {
+    if (runningCount >= MAX_CONCURRENT_AGENTS) {
       reply.code(429).send({
-        error: `Too many running agents (${runningCount}/5). Kill some first.`,
+        error: `Too many running agents (${runningCount}/${MAX_CONCURRENT_AGENTS}). Kill some first.`,
       });
       return;
     }
