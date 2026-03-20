@@ -45,8 +45,10 @@ export function getHealthInfo(name: string): HealthInfo {
 }
 
 function commandExists(cmd: string): boolean {
+  // Validate command name to prevent injection via toolChecks array
+  if (!/^[a-zA-Z0-9_-]+$/.test(cmd)) return false;
   try {
-    execSync(`which ${cmd}`, { stdio: 'ignore' });
+    execSync(`which ${cmd}`, { stdio: 'ignore', timeout: 5000 });
     return true;
   } catch {
     return false;

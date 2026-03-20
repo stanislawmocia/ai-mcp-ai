@@ -1,4 +1,6 @@
 import Fastify from 'fastify';
+import fs from 'node:fs';
+import path from 'node:path';
 import { execHandler } from './executor.js';
 import { getHealthInfo, getCapabilities, setAgentProvider } from './monitor.js';
 import { startHeartbeat } from './heartbeat.js';
@@ -9,22 +11,112 @@ export interface NodeAgentConfig {
   port: number;
   hubUrl: string;
   token: string;
+  bindHost?: string;
+  tlsCert?: string;
+  tlsKey?: string;
+}
+
+// ──── Rate Limiting ────
+interface RateLimitEntry { count: number; resetAt: number; }
+
+function createRateLimiter() {
+  const buckets = new Map<string, RateLimitEntry>();
+
+  setInterval(() => {
+    const now = Date.now();
+    for (const [key, entry] of buckets) {
+      if (now >= entry.resetAt) buckets.delete(key);
+    }
+  }, 5 * 60_000).unref();
+
+  return function check(ip: string, path: string, limit = 60): { allowed: boolean; retryAfter: number } {
+    const now = Date.now();
+    const key = `${ip}:${path}`;
+    let entry = buckets.get(key);
+    if (!entry || now >= entry.resetAt) {
+      entry = { count: 0, resetAt: now + 60_000 };
+      buckets.set(key, entry);
+    }
+    entry.count++;
+    if (entry.count > limit) {
+      return { allowed: false, retryAfter: Math.ceil((entry.resetAt - now) / 1000) };
+    }
+    return { allowed: true, retryAfter: 0 };
+  };
+}
+
+/** Constant-time string comparison */
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let result = 0;
+  for (let i = 0; i < a.length; i++) {
+    result |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return result === 0;
+}
+
+// Allowed tools for agent spawning
+const ALLOWED_AGENT_TOOLS = new Set([
+  'claude-code', 'claude', 'aider',
+  'python', 'python3', 'node',
+  'bash', 'sh',
+]);
+
+// Validate workdir for agent spawning
+function validateAgentWorkdir(workdir: string): { ok: boolean; reason?: string } {
+  if (!workdir || workdir.includes('..')) {
+    return { ok: false, reason: `Invalid workdir: "${workdir}"` };
+  }
+  const resolved = path.resolve(workdir);
+  if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
+    return { ok: false, reason: `Workdir does not exist: "${resolved}"` };
+  }
+  return { ok: true };
 }
 
 export async function startNodeAgent(config: NodeAgentConfig) {
-  const fastify = Fastify({ logger: true });
-  const agentManager = createAgentManager();
+  // TLS
+  const httpsOpts = config.tlsCert && config.tlsKey ? {
+    https: {
+      cert: fs.readFileSync(config.tlsCert),
+      key: fs.readFileSync(config.tlsKey),
+    },
+  } : {};
 
-  // Wire runningAgents into capabilities/heartbeat
+  const fastify = Fastify({ logger: true, ...httpsOpts });
+  const agentManager = createAgentManager();
+  const checkRate = createRateLimiter();
+
   setAgentProvider(() => agentManager.runningIds());
 
-  // Auth middleware
+  // Security headers
+  fastify.addHook('onSend', async (_request, reply) => {
+    reply.header('X-Content-Type-Options', 'nosniff');
+    reply.header('X-Frame-Options', 'DENY');
+    reply.header('Cache-Control', 'no-store');
+  });
+
+  // Rate limiting (before auth)
+  fastify.addHook('onRequest', async (request, reply) => {
+    if (request.url === '/health') return;
+
+    const limit = request.url.startsWith('/exec') ? 20 :
+                  request.url.startsWith('/start-agent') ? 10 : 60;
+    const rl = checkRate(request.ip, request.url.split('?')[0], limit);
+    if (!rl.allowed) {
+      reply.header('Retry-After', rl.retryAfter);
+      return reply.code(429).send({ error: 'Too Many Requests', retryAfter: rl.retryAfter });
+    }
+  });
+
+  // Auth middleware — constant-time comparison
   fastify.addHook('onRequest', async (request, reply) => {
     const url = request.url;
     if (url === '/health') return;
 
     const auth = request.headers.authorization;
-    if (!auth || auth !== `Bearer ${config.token}`) {
+    const expected = `Bearer ${config.token}`;
+    if (!auth || auth.length !== expected.length || !timingSafeEqual(auth, expected)) {
       return reply.code(401).send({ error: 'Unauthorized' });
     }
   });
@@ -63,7 +155,7 @@ export async function startNodeAgent(config: NodeAgentConfig) {
     }));
   });
 
-  // Start agent
+  // Start agent — with tool validation and workdir checks
   fastify.post<{
     Body: {
       tool: string;
@@ -77,7 +169,22 @@ export async function startNodeAgent(config: NodeAgentConfig) {
   }>('/start-agent', async (request, reply) => {
     const { tool, workdir, mode, args, prompt, systemPrompt, timeoutMs } = request.body;
 
-    // Check if tool is available
+    // Validate tool name
+    if (!ALLOWED_AGENT_TOOLS.has(tool)) {
+      reply.code(400).send({
+        error: `Tool "${tool}" is not allowed. Allowed: ${[...ALLOWED_AGENT_TOOLS].join(', ')}`,
+      });
+      return;
+    }
+
+    // Validate workdir
+    const wdCheck = validateAgentWorkdir(workdir);
+    if (!wdCheck.ok) {
+      reply.code(400).send({ error: wdCheck.reason });
+      return;
+    }
+
+    // Check if tool is available on this node
     const caps = getCapabilities();
     const toolName = tool === 'claude-code' ? 'claude' : tool;
     const knownTools = ['claude', 'aider', 'python3', 'node'];
@@ -85,6 +192,15 @@ export async function startNodeAgent(config: NodeAgentConfig) {
       reply.code(400).send({
         error: `Tool "${tool}" is not available on this node`,
         availableTools: caps.tools,
+      });
+      return;
+    }
+
+    // Limit concurrent agents
+    const runningCount = agentManager.runningIds().length;
+    if (runningCount >= 5) {
+      reply.code(429).send({
+        error: `Too many running agents (${runningCount}/5). Kill some first.`,
       });
       return;
     }
@@ -168,8 +284,14 @@ export async function startNodeAgent(config: NodeAgentConfig) {
   });
 
   // Start server
-  await fastify.listen({ port: config.port, host: '0.0.0.0' });
-  console.log(`[meshmind-node] "${config.name}" listening on :${config.port}`);
+  const host = config.bindHost ?? '0.0.0.0';
+  const proto = config.tlsCert ? 'https' : 'http';
+  await fastify.listen({ port: config.port, host });
+  console.log(`[meshmind-node] "${config.name}" listening on ${proto}://${host}:${config.port}`);
+
+  if (!config.tlsCert) {
+    console.warn('[meshmind-node] WARNING: TLS not configured — use TLS_CERT/TLS_KEY for encrypted communication');
+  }
 
   // Start heartbeat to hub
   startHeartbeat(config);

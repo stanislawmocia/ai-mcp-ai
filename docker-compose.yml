@@ -6,14 +6,23 @@ services:
       context: .
       dockerfile: packages/hub-core/Dockerfile
     ports:
-      - "7433:7433"
+      - "${BIND_HOST:-127.0.0.1}:7433:7433"
     volumes:
       - hub_data:/data
+      - ${TLS_CERT_DIR:-./certs}:/certs:ro
     environment:
       HUB_TOKEN: ${HUB_TOKEN}
       DB_PATH: /data/hub.db
       HUB_PORT: "7433"
+      BIND_HOST: "0.0.0.0"
+      TLS_CERT: ${TLS_CERT:-}
+      TLS_KEY: ${TLS_KEY:-}
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:7433/health"]
       interval: 30s
@@ -25,16 +34,30 @@ services:
       context: .
       dockerfile: packages/hub-mcp/Dockerfile
     ports:
-      - "7434:7434"
+      - "${BIND_HOST:-127.0.0.1}:7434:7434"
     depends_on:
       hub-core:
         condition: service_healthy
+    volumes:
+      - ${TLS_CERT_DIR:-./certs}:/certs:ro
     environment:
       HUB_URL: http://hub-core:7433
       HUB_TOKEN: ${HUB_TOKEN}
       MCP_PORT: "7434"
       MCP_TRANSPORT: sse
+      BIND_HOST: "0.0.0.0"
+      TLS_CERT: ${TLS_CERT:-}
+      TLS_KEY: ${TLS_KEY:-}
+      # OAuth settings — generate with: openssl rand -hex 32
+      OAUTH_CLIENT_ID: ${OAUTH_CLIENT_ID:-}
+      OAUTH_CLIENT_SECRET: ${OAUTH_CLIENT_SECRET:-}
+      OAUTH_ALLOWED_IPS: ${OAUTH_ALLOWED_IPS:-}
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:7434/health"]
       interval: 30s
@@ -42,7 +65,7 @@ services:
       retries: 3
 
   # ──── Node agent (one per machine) ────
-  # On the hub server itself, runs with host networking
+  # On the hub server itself, runs with host networking for Tailscale access.
   # For remote machines, use: docker-compose.node.yml
 
   node-agent-local:
@@ -56,11 +79,17 @@ services:
       HUB_URL: http://localhost:7433
       HUB_TOKEN: ${HUB_TOKEN}
       AGENT_PORT: "7432"
+      BIND_HOST: ${BIND_HOST:-127.0.0.1}
       EXEC_ALLOWLIST: ${EXEC_ALLOWLIST:-}
       EXEC_DENYLIST: ${EXEC_DENYLIST:-}
+      EXEC_ALLOWED_WORKDIRS: ${EXEC_ALLOWED_WORKDIRS:-}
+      TLS_CERT: ${TLS_CERT:-}
+      TLS_KEY: ${TLS_KEY:-}
     volumes:
       - agent_logs:/tmp/meshmind-agents
-      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
     depends_on:
       hub-core:

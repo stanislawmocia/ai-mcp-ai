@@ -1,14 +1,19 @@
 import Fastify from 'fastify';
+import fs from 'node:fs';
 import type { Database } from 'bun:sqlite';
 import { initDb } from './db.js';
 import { createRegistry } from './registry.js';
 import { createBroker } from './broker.js';
 import { createContextStore } from './context.js';
+import { registerRateLimit } from './rate-limit.js';
 
 export interface HubConfig {
   port: number;
   token: string;
   dbPath: string;
+  bindHost?: string;
+  tlsCert?: string;
+  tlsKey?: string;
 }
 
 // ──── Session-to-Node SQLite store ────
@@ -45,20 +50,40 @@ function createSessionStore(db: Database) {
 }
 
 export async function startHubCore(config: HubConfig) {
-  const fastify = Fastify({ logger: true });
+  // TLS configuration
+  const httpsOpts = config.tlsCert && config.tlsKey ? {
+    https: {
+      cert: fs.readFileSync(config.tlsCert),
+      key: fs.readFileSync(config.tlsKey),
+    },
+  } : {};
+
+  const fastify = Fastify({ logger: true, ...httpsOpts });
   const db = initDb(config.dbPath);
   const registry = createRegistry();
   const broker = createBroker(db);
   const contextStore = createContextStore(db);
   const sessionStore = createSessionStore(db);
 
-  // Auth middleware
+  // Rate limiting (before auth so brute-force is blocked)
+  registerRateLimit(fastify);
+
+  // Security headers
+  fastify.addHook('onSend', async (_request, reply) => {
+    reply.header('X-Content-Type-Options', 'nosniff');
+    reply.header('X-Frame-Options', 'DENY');
+    reply.header('X-XSS-Protection', '1; mode=block');
+    reply.header('Cache-Control', 'no-store');
+  });
+
+  // Auth middleware — constant-time comparison to prevent timing attacks
   fastify.addHook('onRequest', async (request, reply) => {
     const url = request.url;
     if (url === '/health') return;
 
     const auth = request.headers.authorization;
-    if (!auth || auth !== `Bearer ${config.token}`) {
+    const expected = `Bearer ${config.token}`;
+    if (!auth || auth.length !== expected.length || !timingSafeEqual(auth, expected)) {
       return reply.code(401).send({ error: 'Unauthorized' });
     }
   });
@@ -330,8 +355,10 @@ export async function startHubCore(config: HubConfig) {
   });
 
   // Start
-  await fastify.listen({ port: config.port, host: '0.0.0.0' });
-  console.log(`[meshmind-hub] Core listening on :${config.port}`);
+  const host = config.bindHost ?? '0.0.0.0';
+  const proto = config.tlsCert ? 'https' : 'http';
+  await fastify.listen({ port: config.port, host });
+  console.log(`[meshmind-hub] Core listening on ${proto}://${host}:${config.port}`);
 
   // Graceful shutdown
   const shutdown = async () => {
@@ -353,14 +380,32 @@ function extractIp(ip: string): string {
   return ip;
 }
 
+/** Constant-time string comparison to prevent timing attacks on token validation */
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let result = 0;
+  for (let i = 0; i < a.length; i++) {
+    result |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return result === 0;
+}
+
 // Direct run
 const port = parseInt(process.env.HUB_PORT ?? '7433', 10);
 const token = process.env.HUB_TOKEN ?? '';
 const dbPath = process.env.DB_PATH ?? './data/hub.db';
+const bindHost = process.env.BIND_HOST ?? '0.0.0.0';
+const tlsCert = process.env.TLS_CERT || undefined;
+const tlsKey = process.env.TLS_KEY || undefined;
 
 if (!token) {
   console.error('Error: HUB_TOKEN environment variable is required');
   process.exit(1);
 }
 
-startHubCore({ port, token, dbPath });
+if (token.length < 32) {
+  console.error('Error: HUB_TOKEN must be at least 32 characters (use: openssl rand -hex 32)');
+  process.exit(1);
+}
+
+startHubCore({ port, token, dbPath, bindHost, tlsCert, tlsKey });
